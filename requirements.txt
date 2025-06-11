@@ -1,0 +1,5 @@
+cvxpylayers
+marimo
+matplotlib
+plotly
+torch

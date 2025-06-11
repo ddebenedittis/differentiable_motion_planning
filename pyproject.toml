@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "dimp"
+version = "0.0.1"
+authors = [
+    { name="Davide De Benedittis", email="davide.debenedittis@gmail.com" },
+]
+description = ""
+readme = "README.md"
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "cvxpylayers",
+    "marimo",
+    "matplotlib",
+    "plotly",
+    "torch",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dimp"]
