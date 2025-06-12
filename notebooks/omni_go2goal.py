@@ -9,7 +9,6 @@ def _():
     import cvxpy as cp
     import numpy as np
     import plotly.graph_objects as go
-
     return cp, go, np
 
 
