@@ -1,4 +1,9 @@
 {
     "python.defaultInterpreterPath": ".venv/bin/python",
-    "marimo.pythonPath": ".venv/bin/python"
+    "marimo.pythonPath": ".venv/bin/python",
+    "pylint.args": [
+        "--disable=missing-docstring",
+        "--disable=redefined-builtin",
+        "--disable=trailing-whitespace",
+    ]
 }
