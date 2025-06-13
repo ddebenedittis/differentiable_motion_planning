@@ -9,49 +9,59 @@ def _():
     import cvxpy as cp
     import numpy as np
     import plotly.graph_objects as go
-    return cp, go, np
+
+    from dimp.robots import (
+        OmniState, OmniInput, OmniRobot, RobotMPCData
+    )
+    return OmniInput, OmniRobot, OmniState, RobotMPCData, cp, go, np
 
 
 @app.cell
-def _(cp, np):
-    ns = 2  # number of states
-    ni = 2  # number of inputs
+def _(OmniInput, OmniRobot, OmniState, RobotMPCData, cp, np):
+    ns = 2      # Number of states (x, y)
+    ni = 2      # Number of inputs (vx, vy)
 
-    s0 = cp.Parameter(2)           # initial state
-    dt = cp.Parameter(nonneg=True)  # time step
+    nc = 2      # Number of control intervals
 
-    state = cp.Variable(ns)
-    input = cp.Variable(ni)
-    x = cp.hstack([state, input])
+    s0 = cp.Parameter(ns)
+
+    mpc_data = RobotMPCData(
+        nc=nc,
+        states_list=[OmniState(s0)] + [OmniState(cp.Variable(ns)) for _ in range(nc)],
+        inputs_list=[OmniInput(cp.Variable(ni)) for _ in range(nc)],
+    )
+
+    dt = cp.Parameter()
+    robot = OmniRobot(dt=dt, mpc_data=mpc_data)
 
     # ============================= Define The Cost ============================= #
 
-    p_goal = np.array([10, 5])
+    p_goal = np.array([10.0, 5.0])
 
-    A = np.block([
-        [np.eye(ns), np.zeros((ns, ni))],
-    ])
-    b = - p_goal
-    objective = cp.Minimize(0.5 * cp.pnorm(A @ x + b, p=2))
+    objective = cp.Minimize(
+        0.5 * cp.sum([cp.pnorm(mpc_data.statei[i+1] - p_goal) for i in range(nc)])
+    )
 
     # ========================== Define The Constraints ========================= #
 
     v_max = 1.0
 
-    constraints = [
-        - state + input * dt + s0 == 0,
-        cp.norm(input, p=2) - v_max <= 0,
+    dynamics_constraints = robot.dt_dynamics_constraint()
+
+    input_constraints = [
+        cp.norm(mpc_data.inputi[0], p=2) - v_max <= 0,
+        cp.norm(mpc_data.inputi[1], p=2) - v_max <= 0,
     ]
 
-    # ============================ Define The Problem =========================== #
+    constraints = dynamics_constraints + input_constraints
 
     problem = cp.Problem(objective, constraints)
     assert problem.is_dpp()
-    return dt, input, ni, ns, problem, s0, state
+    return dt, mpc_data, ni, ns, problem, s0
 
 
 @app.cell
-def _(dt, input, ni, np, ns, problem, s0, state):
+def _(dt, mpc_data, ni, np, ns, problem, s0):
     steps = 200
 
     states = np.zeros((steps, ns))
@@ -64,10 +74,10 @@ def _(dt, input, ni, np, ns, problem, s0, state):
 
         problem.solve()
 
-        s0.value = state.value
+        s0.value = mpc_data.statei[1].value
 
-        states[i, :] = state.value
-        inputs[i, :] = input.value
+        states[i, :] = mpc_data.statei[1].value
+        inputs[i, :] = mpc_data.inputi[1].value
     return states, steps
 
 

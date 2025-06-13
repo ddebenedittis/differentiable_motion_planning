@@ -1,5 +1,4 @@
 from abc import ABC, abstractmethod
-from copy import deepcopy
 
 import numpy as np
 
@@ -20,15 +19,16 @@ class GeneralRobotState(GeneralRobotData):
     @property
     def state(self):
         assert self._state is not None, f"'{self.property_names[0]} has not been initialized."
-        assert len(self._state) == self.n, f"'{self.property_names[0]} must have length {self.n}."
+        assert self._state.shape == (self.n,), f"'{self.property_names[0]} must have length {self.n}."
         
         return self._state
+    
     @state.setter
     def state(self, value):
         assert value is not None, f"'{self.property_names[0]} cannot be None."
-        assert len(value) == self.n, f"'{self.property_names[0]} must have length {self.n}."
+        assert value.shape == (self.n,), f"'{self.property_names[0]} must have length {self.n}."
         
-        self._state = deepcopy(value)
+        self._state = value
         
 class GeneralRobotInput(GeneralRobotData):
     n = 0      # number of input
@@ -41,15 +41,16 @@ class GeneralRobotInput(GeneralRobotData):
     @property
     def input(self):
         assert self._input is not None, f"'{self.property_names[0]} has not been initialized."
-        assert len(self._input) == self.n, f"'{self.property_names[0]} must have length {self.n}."
+        assert self._input.shape == (self.n,), f"'{self.property_names[0]} must have length {self.n}."
         
         return self._input
+    
     @input.setter
     def input(self, value):
         assert value is not None, f"'{self.property_names[0]} cannot be None."
-        assert len(value) == self.n, f"'{self.property_names[0]} must have length {self.n}."
+        assert value.shape == (self.n,), f"'{self.property_names[0]} must have length {self.n}."
         
-        self._input = deepcopy(value)
+        self._input = value
 
 
 class RobotMPCData:
@@ -68,16 +69,19 @@ class RobotMPCData:
         
         assert isinstance(states_list, list) and all(isinstance(d, GeneralRobotData) for d in states_list), \
             "states_list must be a list of GeneralRobotData instances."
-        super().__setattr__('states_list', [deepcopy(d) for d in states_list])
+        super().__setattr__('states_list', [d for d in states_list])
         
         assert isinstance(inputs_list, list) and all(isinstance(d, GeneralRobotData) for d in inputs_list), \
             "inputs_list must be a list of GeneralRobotData instances."
-        super().__setattr__('inputs_list', [deepcopy(d) for d in inputs_list])
+        super().__setattr__('inputs_list', [d for d in inputs_list])
         
         super().__setattr__('_states_names', set(states_list[0].property_names) if states_list else set())
         super().__setattr__('_inputs_names', set(inputs_list[0].property_names) if inputs_list else set())
 
     def __getattr__(self, name):
+        if name == 'nc':
+            return self.nc
+        
         for names, datas_list in zip([self._states_names, self._inputs_names], [self.states_list, self.inputs_list]):
             if name in self._states_names:
                 return np.concatenate([getattr(d, name) for d in datas_list])
@@ -95,15 +99,16 @@ class RobotMPCData:
                 if len(value) != len(datas_list):
                     raise ValueError(f"Expected {len(datas_list)} values, got {len(value)}")
                 for d, v in zip(datas_list, value):
-                    setattr(d, name, deepcopy(v))
+                    setattr(d, name, v)
             else:
-                super().__setattr__(name, deepcopy(value))      
+                super().__setattr__(name, value)      
 
 
 class GeneralRobot(ABC):
-    def __init__(self, dt: float = 0.1):
-        assert dt > 0, "Time step must be positive."
+    def __init__(self, dt: float = 0.1, mpc_data: RobotMPCData | None = None):
         self.dt = dt
+        
+        self.mpc_data: RobotMPCData | None = mpc_data
         
     @abstractmethod
     def ct_dynamics(self, state, input):
@@ -111,3 +116,11 @@ class GeneralRobot(ABC):
     
     def dt_dynamics(self, state, input):
         return self.ct_dynamics(state, input) * self.dt
+
+    def dt_dynamics_constraint(self):
+        return [
+            - self.mpc_data.statei[i+1] \
+                + self.dt_dynamics(self.mpc_data.statei[i], self.mpc_data.inputi[i]) \
+                + self.mpc_data.statei[i] == 0 \
+            for i in range(self.mpc_data.nc)
+        ]
