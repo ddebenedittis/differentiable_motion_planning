@@ -63,7 +63,14 @@ class RobotMPCData:
         def __setitem__(self, i, value):
             setattr(self._datas[i], self._attr, value)
 
-    def __init__(self, nc: int, states_list: list, inputs_list: list):
+    def __init__(
+        self,
+        nc: int,
+        states_list: list | None = None,
+        inputs_list: list | None = None,
+        statesbar_list: list | None = None,
+        inputsbar_list: list | None = None,
+    ):
         assert isinstance(nc, int) and nc > 0, "Number of control steps (nc) must be a positive integer."
         super().__setattr__('nc', nc)
         
@@ -71,9 +78,17 @@ class RobotMPCData:
             "states_list must be a list of GeneralRobotData instances."
         super().__setattr__('states_list', [d for d in states_list])
         
+        assert isinstance(statesbar_list, list) and all(isinstance(d, GeneralRobotData) for d in statesbar_list), \
+            "statesbar_list must be a list of GeneralRobotData instances."
+        super().__setattr__('statesbar_list', [d for d in statesbar_list])
+        
         assert isinstance(inputs_list, list) and all(isinstance(d, GeneralRobotData) for d in inputs_list), \
             "inputs_list must be a list of GeneralRobotData instances."
         super().__setattr__('inputs_list', [d for d in inputs_list])
+        
+        assert isinstance(inputsbar_list, list) and all(isinstance(d, GeneralRobotData) for d in inputsbar_list), \
+            "inputsbar_list must be a list of GeneralRobotData instances."
+        super().__setattr__('inputsbar_list', [d for d in inputsbar_list])
         
         super().__setattr__('_states_names', set(states_list[0].property_names) if states_list else set())
         super().__setattr__('_inputs_names', set(inputs_list[0].property_names) if inputs_list else set())
@@ -82,7 +97,13 @@ class RobotMPCData:
         if name == 'nc':
             return self.nc
         
-        for names, datas_list in zip([self._states_names, self._inputs_names], [self.states_list, self.inputs_list]):
+        if 'bar' not in name:
+            lists = [self.states_list, self.inputs_list]
+        else:
+            lists = [self.statesbar_list, self.inputsbar_list]
+            name = name.replace('bar', '')
+            
+        for names, datas_list in zip([self._states_names, self._inputs_names], lists):
             if name in self._states_names:
                 return np.concatenate([getattr(d, name) for d in datas_list])
             if name.endswith('i') and name[:-1] in names:
@@ -93,15 +114,27 @@ class RobotMPCData:
         if name in ('nc', 'names_list', 'inputs_list'):
             super().__setattr__(name, value)
             return
+        
+        if 'bar' not in name:
+            lists = [self.states_list, self.inputs_list]
+        else:
+            lists = [self.statesbar_list, self.inputsbar_list]
+            name = name.replace('bar', '')
             
-        for names, datas_list in zip([self._states_names, self._inputs_names], [self.states_list, self.inputs_list]):
+        for names, datas_list in zip([self._states_names, self._inputs_names], lists):
             if name in names:
                 if len(value) != len(datas_list):
                     raise ValueError(f"Expected {len(datas_list)} values, got {len(value)}")
                 for d, v in zip(datas_list, value):
                     setattr(d, name, v)
             else:
-                super().__setattr__(name, value)      
+                super().__setattr__(name, value)
+                
+    def update_bar(self):
+        self.statebari[0].value = self.statei[0].value
+        for i in range(self.nc):
+            self.statebari[i+1].value = self.statei[i+1].value
+            self.inputbari[i].value = self.inputi[i].value
 
 
 class GeneralRobot(ABC):
