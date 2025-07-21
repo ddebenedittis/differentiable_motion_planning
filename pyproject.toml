@@ -20,6 +20,7 @@ dependencies = [
     "cvxpylayers",
     "marimo",
     "matplotlib",
+    "nbformat",
     "plotly",
     "torch",
 ]

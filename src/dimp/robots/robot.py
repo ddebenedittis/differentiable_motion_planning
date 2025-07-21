@@ -92,6 +92,8 @@ class RobotMPCData:
         
         super().__setattr__('_states_names', set(states_list[0].property_names) if states_list else set())
         super().__setattr__('_inputs_names', set(inputs_list[0].property_names) if inputs_list else set())
+        
+        self.initialize()
 
     def __getattr__(self, name):
         if name == 'nc':
@@ -130,6 +132,14 @@ class RobotMPCData:
             else:
                 super().__setattr__(name, value)
                 
+    def initialize(self):
+        self.statei[0].value = np.zeros(self.statei[0].shape)
+        for i in range(self.nc):
+            self.statei[i+1].value = np.zeros(self.statei[i+1].shape)
+            self.inputi[i].value = np.zeros(self.inputi[i].shape)
+            self.statebari[i+1].value = np.zeros(self.statebari[i+1].shape)
+            self.inputbari[i].value = np.zeros(self.inputbari[i].shape)
+    
     def update_bar(self):
         self.statebari[0].value = self.statei[0].value
         for i in range(self.nc):
