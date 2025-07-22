@@ -24,16 +24,26 @@ pip3 install -e .
 
 So empty...
 
+## Development
+
+### Pre-commit hooks
+
+Pre commit hooks are used to clean up Jupyter notebooks.
+
+Install pre-commit with:
+```bash
+pip3 install pre-commit
+```
+
+To install pre-commit hooks, run:
+```bash
+pre-commit install
+```
+
 ## Notebooks
 
-All the notebooks do use [Marimo](https://marimo.io/), instead of classic Jupyter notebooks.
-Look it up 🙄.
-There is also a VS Code extension for it.
+After trying out [Marimo](https://marimo.io/), I decided to go back to Jupyter notebooks.
+Sad.
 
 ## Troubleshooting
 
-Marimo notebooks sucks a bit and get stuck sometimes.
-In that case, use:
-```bash
-pkill -f marimo
-```
