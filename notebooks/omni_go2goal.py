@@ -55,7 +55,7 @@ def _(OmniInput, OmniRobot, OmniState, RobotMPCData, cp, np):
 
     nc = 2      # Number of control intervals
 
-    s0 = cp.Parameter(ns)
+    s0 = cp.Parameter(ns, name="s0")
 
     mpc_data = RobotMPCData(
         nc=nc,
@@ -76,7 +76,7 @@ def _(OmniInput, OmniRobot, OmniState, RobotMPCData, cp, np):
 
     populate_mpc_data(mpc_data)
 
-    dt = cp.Parameter()
+    dt = cp.Parameter(name="dt")
     dt.value = 0.1
     robot = OmniRobot(dt=dt, mpc_data=mpc_data)
 
@@ -89,7 +89,6 @@ def _(OmniInput, OmniRobot, OmniState, RobotMPCData, cp, np):
     obstacle_position = np.array([5.0, 2.5])
     obstacle_radius = 1.0
     return (
-        dt,
         mpc_data,
         nc,
         ni,
@@ -144,7 +143,7 @@ def _(mo):
 
 
 @app.cell
-def _(dt, ni, np, ns, s0):
+def _(ni, np, ns, s0):
     def simulate(problem, mpc_data):
         steps = 200
 
@@ -152,7 +151,6 @@ def _(dt, ni, np, ns, s0):
         inputs = np.zeros((steps, ni))
 
         s0.value = np.array([0, 0])
-        dt.value = 0.1
 
         for i in range(steps):
 
@@ -340,32 +338,23 @@ def _(
         assert problem.is_dpp(), "The problem is not DPP"
 
         return problem
-    return (create_dqp_log_barrier,)
+    return
 
 
 @app.cell
-def _(
-    cp,
-    create_dqp_log_barrier,
-    mpc_data,
-    np,
-    obstacle_position,
-    obstacle_radius,
-    plot_trajectory,
-    simulate,
-):
-    def simulate_and_plot_dqp_log_barrier():
-        theta = cp.Parameter(2, nonneg=True)
+def _():
+    # def simulate_and_plot_dqp_log_barrier():
+    #     theta = cp.Parameter(2, name='theta', nonneg=True)
 
-        theta.value = np.array([1e0, 1e0])
+    #     theta.value = np.array([1e0, 1e0])
 
-        dqp = create_dqp_log_barrier(theta)
+    #     dqp = create_dqp_log_barrier(theta)
 
-        states, inputs = simulate(dqp, mpc_data)
+    #     states, inputs = simulate(dqp, mpc_data)
 
-        plot_trajectory(states, obstacle_position, obstacle_radius)
+    #     plot_trajectory(states, obstacle_position, obstacle_radius)
 
-    simulate_and_plot_dqp_log_barrier()
+    # simulate_and_plot_dqp_log_barrier()
     return
 
 
@@ -383,7 +372,7 @@ def _(mo):
             \begin{alignedat}{3}
                 s_{k+1} &= A_k s_k + B_k u_k & \qquad & k = 1, \dots, n_c & \qquad & \text{(Dynamics)} \\
                 u_k^2 &\le u_{\max}^2 & & k = 1, \dots, n_c & & \text{(Input limits)} \\
-                (p_k - p_\mathrm{o})^T (\bar{p} - p_\mathrm{o}) &\ge d_s^2 - s_k & & k = 1, \dots, n_c & & \text{(Collision avoidance)} \\
+                (p_k - p_\mathrm{o})^T (\bar{p} - p_\mathrm{o}) &\ge s_k & & k = 1, \dots, n_c & & \text{(Collision avoidance)} \\
                 s_k & \geq 0 & & k = 1, \dots, n_c & & \text{(Auxiliary)}
             \end{alignedat}
         \end{align}$$
@@ -393,22 +382,13 @@ def _(mo):
 
 
 @app.cell
-def _(
-    cp,
-    mpc_data,
-    nc,
-    obstacle_position,
-    obstacle_radius,
-    p_goal,
-    robot,
-    v_max,
-):
-    aux2 = cp.Variable(nc*2, nonneg=True)
+def _(cp, mpc_data, nc, obstacle_position, p_goal, robot, v_max):
+    aux2 = cp.Variable(nonneg=True)
 
     def create_dqp_quadratic_penalty(theta):
         objective = cp.Minimize(
             + 0.5 * theta[0] * cp.sum([cp.pnorm(mpc_data.statei[i+1] - p_goal) for i in range(nc)]) \
-            + theta[1] * cp.sum(cp.pnorm(aux2, p=2))
+            + theta[1] * cp.pnorm(aux2, p=2)
         )
 
         dynamics_constraints = robot.dt_dynamics_constraint()
@@ -419,10 +399,8 @@ def _(
         ]
 
         collision_constraints = [
-            cp.transpose(mpc_data.statei[i+1] - obstacle_position) @ (mpc_data.statebari[i+1] - obstacle_position) - cp.pnorm(obstacle_radius, p=2) >= - aux2[i]
+            cp.transpose(mpc_data.statei[i+1] - obstacle_position) @ (mpc_data.statebari[i+1] - obstacle_position) >= aux2
             for i in range(nc)
-        ] + [
-            aux2[i] >= 0 for i in range(nc*2)
         ]
 
         constraints = dynamics_constraints + input_constraints + collision_constraints
@@ -432,33 +410,23 @@ def _(
         assert problem.is_dpp(), "The problem is not DPP"
 
         return problem
-
-    return (create_dqp_quadratic_penalty,)
+    return
 
 
 @app.cell
-def _(
-    cp,
-    create_dqp_quadratic_penalty,
-    mpc_data,
-    np,
-    obstacle_position,
-    obstacle_radius,
-    plot_trajectory,
-    simulate,
-):
-    def simulate_and_plot_dqp_quadratic_penalty():
-        theta = cp.Parameter(2, nonneg=True)
+def _():
+    # def simulate_and_plot_dqp_quadratic_penalty():
+    #     theta = cp.Parameter(2, name='theta', nonneg=True)
 
-        theta.value = np.array([1e0, 1e0])
+    #     theta.value = np.array([1e0, 1e0])
 
-        dqp = create_dqp_quadratic_penalty(theta)
+    #     dqp = create_dqp_quadratic_penalty(theta)
 
-        states, inputs = simulate(dqp, mpc_data)
+    #     states, inputs = simulate(dqp, mpc_data)
 
-        plot_trajectory(states, obstacle_position, obstacle_radius)
+    #     plot_trajectory(states, obstacle_position, obstacle_radius)
 
-    simulate_and_plot_dqp_quadratic_penalty()
+    # simulate_and_plot_dqp_quadratic_penalty()
     return
 
 
