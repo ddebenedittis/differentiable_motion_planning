@@ -26,6 +26,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+notebook = [
+    "ipykernel",
+    "pandas",
+    "tqdm"
+]
 test = [
     "pytest",
 ]
