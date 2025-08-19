@@ -154,16 +154,18 @@ class GeneralRobot(ABC):
         self.mpc_data: RobotMPCData | None = mpc_data
         
     @abstractmethod
-    def ct_dynamics(self, state, input):
+    def ct_dynamics(self, state, input, state_bar=None, input_bar=None):
         pass
     
-    def dt_dynamics(self, state, input):
-        return self.ct_dynamics(state, input) * self.dt
+    def dt_dynamics(self, state, input, state_bar=None, input_bar=None):
+        return self.ct_dynamics(state, input, state_bar, input_bar) * self.dt
 
     def dt_dynamics_constraint(self):
         return [
             - self.mpc_data.statei[i+1] \
-                + self.dt_dynamics(self.mpc_data.statei[i], self.mpc_data.inputi[i]) \
+                + self.dt_dynamics(
+                    self.mpc_data.statei[i], self.mpc_data.inputi[i],
+                    self.mpc_data.statebari[i+1], self.mpc_data.inputbari[i]) \
                 + self.mpc_data.statei[i] == 0 \
             for i in range(self.mpc_data.nc)
         ]

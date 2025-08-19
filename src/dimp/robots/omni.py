@@ -43,7 +43,7 @@ class OmniInput(GeneralRobotInput):
 
 
 class OmniRobot(GeneralRobot):
-    def ct_dynamics(self, state, input):
+    def ct_dynamics(self, state, input, state_bar=None, input_bar=None):
         states_dot = input
         
         return states_dot
