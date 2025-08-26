@@ -1,5 +1,7 @@
+from cycler import cycler
 import numpy as np
 import matplotlib as mpl
+import matplotlib.pyplot as plt
 
 
 def gen_arrow_head_marker(rot):
@@ -44,3 +46,43 @@ def gen_arrow_head_marker(rot):
     arrow_head_marker = mpl.path.Path(arr, codes)
 
     return arrow_head_marker, scale
+
+
+def init_matplotlib(palette: str = 'okabe-ito'):
+    colors = get_colors(palette)
+
+    lines = ['-', '--', '-', '--', '-', '--', '-', '--', '-', '--']
+    lines = lines[:len(colors)]
+    
+    default_cycler = (
+        cycler(color=colors) +
+        cycler('linestyle', lines)
+    )
+
+    colors = list(default_cycler.by_key()['color'])
+
+    textsize = 12
+    labelsize = 12
+
+    plt.rc('font', family='serif', serif='Times')
+    plt.rc('text', usetex=True)
+    plt.rc('xtick', labelsize=textsize)
+    plt.rc('ytick', labelsize=textsize)
+    plt.rc('axes', labelsize=labelsize, prop_cycle=default_cycler)
+    plt.rc('legend', fontsize=textsize)
+
+    plt.rc("axes", grid=True, xmargin=0)
+    plt.rc("grid", linestyle='dotted', linewidth=0.25)
+
+    plt.rcParams['figure.constrained_layout.use'] = True
+    
+def get_colors(palette: str = 'okabe-ito'):
+    """Get a list of colors based on the specified palette."""
+    if palette == 'okabe-ito':
+        return ['#E69F00', '#56B4E9', '#009E73', '#F0E442', '#0072B2', '#D55E00', '#CC79A7', '#000000']
+    if palette == 'matlab':
+        return ['#0072BD', '#D95319', '#EDB120', '#7E2F8E', '#77AC30', '#4DBEEE', '#A2142F']
+    if palette == 'colorbrewer_1':
+        return ['#E41A1C', '#377EB8', '#4DAF4A', '#984EA3', '#FF7F00', '#FFFF33', '#A65628', '#F781BF', '#999999']
+    
+    raise ValueError(f"Unknown palette: {palette}")
