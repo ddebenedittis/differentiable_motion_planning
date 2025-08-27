@@ -20,6 +20,32 @@ pip3 install hatchling
 pip3 install -e .
 ```
 
+### Acados
+
+Following [this](https://docs.acados.org/python_interface/index.html), do
+```bash
+mkdir -p external
+cd external
+git clone https://github.com/acados/acados.git
+cd acados
+git submodule update --recursive --init
+mkdir -p build
+cd build
+cmake -DACADOS_WITH_QPOASES=ON ..
+# add more optional arguments e.g. -DACADOS_WITH_DAQP=ON, a list of CMake options is provided below
+make install -j4
+```
+
+Go back to the root folder and install acados with
+```bash
+pip install -e external/acados/interfaces/acados_template
+```
+
+```bash
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:"$PWD/external/acados/lib"
+export ACADOS_SOURCE_DIR="$PWD/external/acados"
+```
+
 ## Usage
 
 So empty...

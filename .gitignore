@@ -1,6 +1,8 @@
 __marimo__
 __pycache__
+c_generated_code
 .venv
 
 *.csv
 *.html
+acados_ocp.json
