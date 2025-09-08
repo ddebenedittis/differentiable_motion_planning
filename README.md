@@ -71,5 +71,7 @@ pre-commit install
 After trying out [Marimo](https://marimo.io/), I decided to go back to Jupyter notebooks.
 Sad.
 
+- [`pann_clqr_dt.ipynb`](notebooks/time_optimization/pann_clqr_dt.ipynb): solves the CLQR problem from ["Whither discrete time model predictive control?"](https://doi.org/10.1109/TAC.2014.2324131) and "Optimal Non-Uniform Time Sampling in Continuous-Time Constrained LQR" using differentiable convex optimization. Takes 30ish minutes to run.
+
 ## Troubleshooting
 
