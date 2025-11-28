@@ -6,4 +6,5 @@ c_generated_code
 *.csv
 *.html
 *.pkl
+*.png
 acados_ocp.json
