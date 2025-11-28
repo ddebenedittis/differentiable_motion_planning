@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 
+import cvxpy as cp
 import numpy as np
 
 
@@ -8,7 +9,7 @@ class GeneralRobotData:
     
     property_names = ["data"]
     
-class GeneralRobotState(GeneralRobotData):
+class GeneralState(GeneralRobotData):
     n = 0      # number of state
     
     property_names = ["state"]
@@ -30,7 +31,7 @@ class GeneralRobotState(GeneralRobotData):
         
         self._state = value
         
-class GeneralRobotInput(GeneralRobotData):
+class GeneralInput(GeneralRobotData):
     n = 0      # number of input
     
     property_names = ["input"]
@@ -53,7 +54,7 @@ class GeneralRobotInput(GeneralRobotData):
         self._input = value
 
 
-class RobotMPCData:
+class MPCData:
     class _AttrIndexer:
         def __init__(self, datas, attr):
             self._datas = datas
@@ -106,10 +107,12 @@ class RobotMPCData:
             name = name.replace('bar', '')
             
         for names, datas_list in zip([self._states_names, self._inputs_names], lists):
-            if name in self._states_names:
-                return np.concatenate([getattr(d, name) for d in datas_list])
+            if name in names:
+                if not datas_list:
+                    return np.array([])
+                return cp.hstack([getattr(d, name) for d in datas_list])
             if name.endswith('i') and name[:-1] in names:
-                return RobotMPCData._AttrIndexer(datas_list, name[:-1])
+                return MPCData._AttrIndexer(datas_list, name[:-1])
         raise AttributeError(f"{type(self).__name__} has no attribute {name!r}")
 
     def __setattr__(self, name, value):
@@ -133,25 +136,32 @@ class RobotMPCData:
                 super().__setattr__(name, value)
                 
     def initialize(self):
-        self.statei[0].value = np.zeros(self.statei[0].shape)
+        if self.states_list:
+            self.statei[0].value = np.zeros(self.statei[0].shape)
         for i in range(self.nc):
-            self.statei[i+1].value = np.zeros(self.statei[i+1].shape)
-            self.inputi[i].value = np.zeros(self.inputi[i].shape)
-            self.statebari[i+1].value = np.zeros(self.statebari[i+1].shape)
-            self.inputbari[i].value = np.zeros(self.inputbari[i].shape)
+            if self.states_list:
+                self.statei[i+1].value = np.zeros(self.statei[i+1].shape)
+            if self.inputs_list:
+                self.inputi[i].value = np.zeros(self.inputi[i].shape)
+            if self.statesbar_list:
+                self.statebari[i+1].value = np.zeros(self.statebari[i+1].shape)
+            if self.inputsbar_list:
+                self.inputbari[i].value = np.zeros(self.inputbari[i].shape)
     
     def update_bar(self):
         self.statebari[0].value = self.statei[0].value
         for i in range(self.nc):
-            self.statebari[i+1].value = self.statei[i+1].value
-            self.inputbari[i].value = self.inputi[i].value
+            if self.states_list:
+                self.statebari[i+1].value = self.statei[i+1].value
+            if self.inputs_list:
+                self.inputbari[i].value = self.inputi[i].value
 
 
 class GeneralRobot(ABC):
-    def __init__(self, dt: float = 0.1, mpc_data: RobotMPCData | None = None):
+    def __init__(self, dt: float = 0.1, mpc_data: MPCData | None = None):
         self.dt = dt
         
-        self.mpc_data: RobotMPCData | None = mpc_data
+        self.mpc_data: MPCData | None = mpc_data
         
     @abstractmethod
     def ct_dynamics(self, state, input, state_bar=None, input_bar=None):

@@ -1,7 +1,7 @@
-from dimp.robots.robot import GeneralRobot, GeneralRobotState, GeneralRobotInput
+from dimp.robots.robot import GeneralRobot, GeneralState, GeneralInput
 
 
-class OmniState(GeneralRobotState):
+class OmniState(GeneralState):
     n = 2   # number of states
     
     property_names = ['state', 'x', 'y']
@@ -20,7 +20,7 @@ class OmniState(GeneralRobotState):
     def y(self, value):
         self.state[1:2] = value
     
-class OmniInput(GeneralRobotInput):
+class OmniInput(GeneralInput):
     n = 2   # number of inputs
     
     property_names = ['input', 'vx', 'vy']

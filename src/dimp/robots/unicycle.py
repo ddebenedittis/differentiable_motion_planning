@@ -1,10 +1,10 @@
 import cvxpy as cp
 import numpy as np
 
-from dimp.robots.robot import GeneralRobot, GeneralRobotState, GeneralRobotInput
+from dimp.robots.robot import GeneralRobot, GeneralState, GeneralInput
 
 
-class UniState(GeneralRobotState):
+class UniState(GeneralState):
     n = 3   # number of states
     
     property_names = ['state', 'x', 'y', 'theta']
@@ -30,7 +30,7 @@ class UniState(GeneralRobotState):
     def theta(self, value):
         self.state[2:3] = value
 
-class UniInput(GeneralRobotInput):
+class UniInput(GeneralInput):
     n = 2   # number of inputs
     
     property_names = ['input', 'v', 'omega']
