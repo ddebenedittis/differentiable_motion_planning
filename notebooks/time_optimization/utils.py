@@ -41,6 +41,20 @@ def get_n_epochs(run_mode, method_key, n_epochs_override=None):
     return DEFAULT_EPOCHS[method_key]
 
 
+def get_method_run_mode(run_mode, method_key, run_overrides=None):
+    """Return effective RunMode for a method, checking overrides first."""
+    if run_overrides and method_key in run_overrides:
+        return run_overrides[method_key]
+    return run_mode
+
+
+def pickle_name(base_name, n, n_default=None):
+    """Append _nXX suffix when n differs from default (backward compatible)."""
+    if n_default is not None and n != n_default:
+        return f"{base_name}_n{n}"
+    return base_name
+
+
 # ============================================================================ #
 # Discretization
 # ============================================================================ #
