@@ -6,33 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 DIMP (Differentiable Motion Planning) is a research project implementing differentiable trajectory optimization for robotic systems. It uses cvxpylayers to enable backpropagation through convex optimization problems, allowing end-to-end learning with motion planning.
 
-## Commands
-
-```bash
-# Setup
-python3 -m venv .venv
-source .venv/bin/activate
-pip3 install hatchling
-pip3 install -e .
-
-# For notebooks
-pip3 install -e ".[notebook]"
-
-# Run tests
-pytest
-
-# Environment (required for Acados notebooks)
-source .env
-```
-
-### Acados Setup (optional, for unicycle_acados.ipynb)
-```bash
-cd external && git clone https://github.com/acados/acados.git
-cd acados && git submodule update --recursive --init
-mkdir -p build && cd build
-cmake -DACADOS_WITH_QPOASES=ON .. && make install -j4
-cd ../../../ && pip install -e external/acados/interfaces/acados_template
-```
+Key dependencies: `cvxpy`, `cvxpylayers`, `torch`, `matplotlib`, `scipy`.
 
 ## Architecture
 
@@ -67,6 +41,23 @@ The core abstraction is a hierarchy for building MPC problems with CVXPY:
 - **disp_anim.py**: Animation framework for trajectory visualization
 - **voronoi_task.py**: Bounded Voronoi diagrams for multi-robot task allocation
 
+### Imports / Public API
+
+```python
+from dimp.robots import (
+    GeneralState, GeneralInput, GeneralRobot, MPCData,
+    ForceInput,
+    OmniState, OmniInput, OmniRobot,
+    PointMassState, PointMassInput, PointMassRobot,
+    UniState, UniInput, UniRobot,
+)
+from dimp.utils import (
+    init_matplotlib, get_colors, gen_arrow_head_marker,
+    Animation, Player, MultiRobotArtistFlags,
+    display_animation, save_snapshots, plot_distances, plot_colour_line,
+)
+```
+
 ## Key Patterns
 
 **MPC Problem Setup:**
@@ -84,43 +75,20 @@ constraints = robot.dt_dynamics_constraint()
 
 **Nonlinear robots (UniRobot):** Require `update_bar()` after solving to update linearization point for iterative refinement.
 
+## Conventions
+
+- **Pre-commit hook**: `nb-clean` strips notebook metadata/empty cells on commit
+- **Data persistence**: Pickle files in `data/` dirs; notebooks use `rerun=True` flag to skip re-computation
+- **Visualization**: Always call `init_matplotlib()` before plotting
+
 ## Notebooks
 
-- `omni_go2goal_traj_opt.ipynb` - Basic trajectory optimization
-- `omni_go2goal_layer.ipynb` - cvxpylayers differentiable optimization
-- `mro_g2g.ipynb` - Multi-robot go-to-goal
-- `notebooks/time_optimization/pann_clqr_dt.ipynb` - Differentiable time optimization (main reference)
-- `unicycle_acados.ipynb` - Acados real-time optimal control
+- `gain_optimization/omni_go2goal_traj_opt.ipynb` — Basic trajectory optimization
+- `gain_optimization/omni_go2goal_layer.ipynb` — cvxpylayers differentiable optimization
+- `gain_optimization/unicycle_go2goal.ipynb` — Unicycle trajectory optimization with SQP
+- `gain_optimization/point_mass_push.ipynb` — Point mass with obstacle/contact constraints
+- `gain_optimization/n_ode.ipynb` — Neural ODE learning of unicycle dynamics
+- `gain_optimization/mro_g2g.ipynb` — Multi-robot go-to-goal
+- `gain_optimization/unicycle_acados.ipynb` — Acados real-time optimal control
+- `time_optimization/pann_clqr_dt.ipynb` — Differentiable time optimization (main reference)
 
-## Differentiable Time Optimization (`pann_clqr_dt.ipynb`)
-
-This notebook explores **learning optimal discretization timesteps** for OCP via gradient descent through cvxpylayers.
-
-### Problem Setup
-- LTI system (Pannocchia example): 3 states, 1 input, T=10s horizon, n=160 timesteps
-- Goal: Learn non-uniform Δtₖ that better approximates continuous-time optimal control
-
-### Key Insight
-Instead of uniform timesteps, make Δtₖ learnable parameters optimized to place **finer sampling where trajectory changes rapidly**.
-
-### Approaches Implemented
-
-| Method | Description | Key Variables |
-|--------|-------------|---------------|
-| **Aux (Auxiliary Variables)** | δₖ as QP optimization variables with regularization | `sol_aux`, `history_aux`, `loss_methods` |
-| **Rep (Reparametrized)** | Softmax simplex: Δtₖ = ε + (T-nε)·softmax(θ)ₖ | `sol_rep`, `history_rep`, `loss_methods_2` |
-| **HS (Hyper-Sampling)** | Evaluate loss on dense grid (uniform_resample or substeps) | `sol_hs`, `history_hs`, `loss_methods_hs` |
-| **ZOH** | Exact discretization via matrix exponential | `sol_zoh`, `history_zoh`, `loss_methods_zoh` |
-| **ZOH2** | ZOH with √Δt cost scaling in QP | `sol_zoh_2`, `history_zoh_2`, `loss_methods_zoh_2` |
-
-### Loss Functions
-- **Unscaled**: Σ(sₖᵀQsₖ + uₖᵀRuₖ)
-- **Time-scaled**: Σ Δtₖ(sₖᵀQsₖ + uₖᵀRuₖ) — approximates continuous integral
-
-### Analysis Metrics
-- **Sampling density**: (1/Δtₖ)·(T/n), equals 1 for uniform sampling
-- **Cross-correlation**: Time-lagged correlation between sampling density and |Δu|, |Δs|, |u|, |s|, t
-- **Significance bounds**: ±1.96/√n for 95% CI (values outside = statistically significant)
-
-### Data Storage
-Results saved in `data/pann_clqr_dt/` as pickle files. Set `rerun=True` to regenerate.
