@@ -32,7 +32,8 @@ Instead of uniform timesteps, make $\Delta t_k$ learnable parameters optimized t
 ## Local Files
 - **`pann_clqr_dt.py`** — Data generation script: trains all 6 methods, saves pickles to `data/pann_clqr_dt/`
 - **`plot_pann_clqr_dt.py`** — Visualization script: loads pickles, produces plots in `results/pann_clqr_dt/`
-- **`run_alt_losses.py`** — Alternative loss function experiments (ZOH3 base + regularizer losses)
+- **`alt_losses.py`** — Data generation for alternative loss experiments (ZOH3 base + regularizer losses)
+- **`plot_alt_losses.py`** — Visualization for alternative loss experiments (loads pickles, produces plots)
 - **`pann_clqr.py`** — QP builders (CVXPY problem definitions + CvxpyLayer wrappers)
 - **`utils.py`** — Shared utilities (discretization, loss functions, plotting, I/O)
 - **`data/`** — Pickle files with saved results
@@ -54,4 +55,16 @@ python plot_pann_clqr_dt.py --analysis-only
 
 # Include baseline sweep
 python plot_pann_clqr_dt.py --baseline
+
+# Alternative losses: train specific losses (test)
+python alt_losses.py --mode test --loss L_IV L_FI
+
+# Alternative losses: train all (full run)
+python alt_losses.py --mode full --loss all
+
+# Alternative losses: generate plots
+python plot_alt_losses.py
+
+# Alternative losses: only analysis plots
+python plot_alt_losses.py --analysis-only
 ```

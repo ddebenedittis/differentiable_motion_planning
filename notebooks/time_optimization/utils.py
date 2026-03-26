@@ -27,14 +27,14 @@ DEFAULT_EPOCHS = {
     "zoh": 300,
     "zoh2": 500,
     "zoh3": 500,
-    "L_IV": 500,
-    "L_EQ": 500,
-    "L_CPC": 500,
-    "L_CSS": 500,
-    "L_defect": 500,
-    "L_dyn": 500,
-    "L_equi": 500,
-    "L_FI": 500,
+    "L_IV": 200,
+    "L_EQ": 200,
+    "L_CPC": 200,
+    "L_CSS": 200,
+    "L_defect": 200,
+    "L_dyn": 200,
+    "L_equi": 200,
+    "L_FI": 200,
 }
 
 TEST_EPOCHS = 5
