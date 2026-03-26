@@ -5,7 +5,7 @@ Loads pickles from data/pann_clqr_dt/ and produces plots in results/pann_clqr_dt
 
 Usage:
     python plot_pann_clqr_dt.py
-    python plot_pann_clqr_dt.py --method rep zoh3
+    python plot_pann_clqr_dt.py --method rep zoh
     python plot_pann_clqr_dt.py --analysis-only
     python plot_pann_clqr_dt.py --show
     python plot_pann_clqr_dt.py --save-video
@@ -40,21 +40,19 @@ from utils import (
 
 @dataclass(frozen=True)
 class MethodConfig:
-    key: str                           # "aux", "rep", "hs", "zoh", "zoh2", "zoh3"
+    key: str                           # "aux", "rep", "hs", "zoh"
     sol_pickle: str                    # base pickle name for solution
     history_pickle: str                # base pickle name for history
     sol_method: int                    # 1 (aux) or 2 (rep/zoh)
     internal_methods: tuple[str, ...]  # sub-methods within this result
-    uses_custom_n: bool = False        # True for zoh3 (needs pickle_name suffix)
+    uses_custom_n: bool = False        # True for zoh (needs pickle_name suffix)
 
 
 METHOD_CONFIGS: list[MethodConfig] = [
     MethodConfig("aux", "sol_aux", "history_aux", 1, ("time scaled", "time bar scaled")),
     MethodConfig("rep", "sol_rep", "history_rep", 2, ("time scaled",)),
     MethodConfig("hs", "sol_hs", "history_hs", 2, ("uniform_resample", "substeps")),
-    MethodConfig("zoh", "sol_zoh", "history_zoh", 2, ("time scaled",)),
-    MethodConfig("zoh2", "sol_zoh_2", "history_zoh_2", 2, ("time scaled",)),
-    MethodConfig("zoh3", "sol_zoh_3", "history_zoh_3", 2, ("exact_zoh_integrated",), uses_custom_n=True),
+    MethodConfig("zoh", "sol_zoh", "history_zoh", 2, ("exact_zoh_integrated",), uses_custom_n=True),
 ]
 
 
@@ -78,7 +76,7 @@ n_u = 1
 # Load Results
 # ============================================================================ #
 
-def load_all_results(data_dir, n=160, n_zoh3=80):
+def load_all_results(data_dir, n=160, n_zoh=80):
     """Load all available method results from pickle files.
 
     Returns:
@@ -89,9 +87,9 @@ def load_all_results(data_dir, n=160, n_zoh3=80):
     for cfg in METHOD_CONFIGS:
         try:
             if cfg.uses_custom_n:
-                sol_pkl = pickle_name(cfg.sol_pickle, n_zoh3, n)
-                hist_pkl = pickle_name(cfg.history_pickle, n_zoh3, n)
-                n_method = n_zoh3
+                sol_pkl = pickle_name(cfg.sol_pickle, n_zoh, n)
+                hist_pkl = pickle_name(cfg.history_pickle, n_zoh, n)
+                n_method = n_zoh
             else:
                 sol_pkl = cfg.sol_pickle
                 hist_pkl = cfg.history_pickle
@@ -304,8 +302,6 @@ def _build_method_solutions(all_results, n):
         "rep": ("Rep", 2),
         "hs": ("HS", 2),
         "zoh": ("ZOH", 2),
-        "zoh2": ("ZOH2", 2),
-        "zoh3": ("ZOH3", 2),
     }
 
     for key, result in all_results.items():
@@ -386,19 +382,17 @@ _VIDEO_CONFIG = {
     ("rep", "time scaled"): ("dts_dist_rep_time_scaled", "rep_timesteps"),
     ("hs", "uniform_resample"): ("dts_dist_hs_uniform_resample", "hs_uniform_timesteps"),
     ("hs", "substeps"): ("dts_dist_hs_substeps", "hs_substeps_timesteps"),
-    ("zoh", "time scaled"): ("dts_dist_zoh", "zoh_timesteps"),
-    ("zoh2", "time scaled"): ("dts_dist_zoh_2", "zoh2_timesteps"),
 }
 
 
-def _save_all_videos(all_results, data_dir, results_dir, n, n_zoh3):
+def _save_all_videos(all_results, data_dir, results_dir, n, n_zoh):
     """Generate timestep evolution videos from saved dts distribution pickles."""
     for name, result in all_results.items():
         for method in result["internal_methods"]:
-            # Look up config, with special handling for zoh3
-            if name == "zoh3":
-                dist_pkl = pickle_name("dts_dist_zoh_3", n_zoh3, n)
-                video_name = f"zoh_3_timesteps_n{n_zoh3}" if n_zoh3 != n else "zoh3_timesteps"
+            # Look up config, with special handling for zoh
+            if name == "zoh":
+                dist_pkl = pickle_name("dts_dist_zoh", n_zoh, n)
+                video_name = f"zoh_timesteps_n{n_zoh}" if n_zoh != n else "zoh_timesteps"
             else:
                 key = (name, method)
                 if key not in _VIDEO_CONFIG:
@@ -438,7 +432,7 @@ def main():
     )
     parser.add_argument("--analysis-only", action="store_true", help="Only cross-method analysis plots")
     parser.add_argument("--n", type=int, default=160, help="Timestep count for pickle naming")
-    parser.add_argument("--n-zoh3", type=int, default=80, help="ZOH3 timestep count")
+    parser.add_argument("--n-zoh", type=int, default=80, help="ZOH timestep count")
     parser.add_argument("--show", action="store_true", help="Display plots interactively")
     parser.add_argument("--baseline", action="store_true", help="Include baseline sweep plot")
     parser.add_argument("--save-video", action="store_true", help="Save timestep evolution videos")
@@ -459,7 +453,7 @@ def main():
         colors = ['#0072B2', '#E69F00', '#009E73', '#CC79A7', '#F0E442', '#D55E00']
 
     print(f"Loading data from: {data_dir}")
-    all_results = load_all_results(data_dir, n=args.n, n_zoh3=args.n_zoh3)
+    all_results = load_all_results(data_dir, n=args.n, n_zoh=args.n_zoh)
 
     if not all_results:
         print("No results found. Run pann_clqr_dt.py first to generate data.")
@@ -501,7 +495,7 @@ def main():
     # Timestep evolution videos
     if args.save_video:
         print("Saving timestep evolution videos...")
-        _save_all_videos(all_results, data_dir, results_dir, args.n, args.n_zoh3)
+        _save_all_videos(all_results, data_dir, results_dir, args.n, args.n_zoh)
 
     print(f"\nPlots saved to: {results_dir}")
 

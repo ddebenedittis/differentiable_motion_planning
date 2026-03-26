@@ -1,13 +1,13 @@
 #!/usr/bin/env python
 """Data generation script for differentiable time optimization experiments.
 
-Trains 6 optimization methods (aux, rep, hs_uniform, hs_substeps, zoh, zoh2, zoh3)
+Trains 5 optimization methods (aux, rep, hs_uniform, hs_substeps, zoh)
 for learning non-uniform timesteps in constrained LQR problems.
 
 Usage:
-    python pann_clqr_dt.py --mode full --method rep zoh zoh3
+    python pann_clqr_dt.py --mode full --method rep zoh
     python pann_clqr_dt.py --mode test --method all
-    python pann_clqr_dt.py --mode full --method zoh3 --n 80 --epochs 500
+    python pann_clqr_dt.py --mode full --method zoh --n 80 --epochs 500
 """
 
 import argparse
@@ -20,8 +20,6 @@ from tqdm import tqdm
 from pann_clqr import (
     create_pann_param_clqr,
     create_pann_param_clqr_2,
-    create_exact_param_pann_clqr,
-    create_exact_param_pann_clqr_2,
     create_exact_zoh_cost_clqr,
 )
 from utils import (
@@ -30,7 +28,6 @@ from utils import (
     pickle_name,
     theta_2_dt,
     Ad_Bd_from_dt,
-    LQs_LRs_from_dt,
     zoh_cost_matrices,
     task_loss,
     uniform_resampling_loss,
@@ -53,15 +50,15 @@ u_max = 1.0
 n_s = 3
 n_u = 1
 
-ALL_METHODS = ["aux", "rep", "hs_uniform", "hs_substeps", "zoh", "zoh2", "zoh3"]
+ALL_METHODS = ["aux", "rep", "hs_uniform", "hs_substeps", "zoh"]
 
 DEFAULT_N = {
     "aux": 160, "rep": 160, "hs_uniform": 160, "hs_substeps": 160,
-    "zoh": 160, "zoh2": 160, "zoh3": 80,
+    "zoh": 80,
 }
 DEFAULT_LR = {
     "aux": 5e-4, "rep": 1e-2, "hs_uniform": 1e-2, "hs_substeps": 1e-2,
-    "zoh": 1e-2, "zoh2": 1e-2, "zoh3": 1e-2,
+    "zoh": 1e-2,
 }
 
 
@@ -157,7 +154,7 @@ def train_aux(n, n_epochs, lr, data_dir):
 
 
 # ============================================================================ #
-# Softmax-Based Training (rep, hs_uniform, hs_substeps, zoh, zoh2, zoh3)
+# Softmax-Based Training (rep, hs_uniform, hs_substeps, zoh)
 # ============================================================================ #
 
 def _create_layer(method_name, n):
@@ -166,12 +163,6 @@ def _create_layer(method_name, n):
         _, layer, _, _, _ = create_pann_param_clqr_2(n, s0, A, B, Q, R, u_max)
         return layer
     elif method_name == "zoh":
-        _, layer, _, _, _, _ = create_exact_param_pann_clqr(n, s0, n_s, n_u, Q, R, u_max)
-        return layer
-    elif method_name == "zoh2":
-        _, layer, _, _, _, _, _, _ = create_exact_param_pann_clqr_2(n, s0, n_s, n_u, u_max)
-        return layer
-    elif method_name == "zoh3":
         _, layer, _, _, _, _, _, _ = create_exact_zoh_cost_clqr(n, s0, n_s, n_u, u_max)
         return layer
     else:
@@ -183,21 +174,12 @@ def _compute_qp_params_and_solve(method_name, layer, dts_torch, n, A_t, B_t, Q_t
 
     Returns:
         sol: layer output tuple
-        W_list: list of cost matrices (only for zoh3, else None)
+        W_list: list of cost matrices (only for zoh, else None)
     """
     if method_name in ("rep", "hs_uniform", "hs_substeps"):
         return layer(dts_torch), None
 
     elif method_name == "zoh":
-        Ad_list, Bd_list = zip(*[Ad_Bd_from_dt(dt_k, A, B) for dt_k in dts_torch])
-        return layer(*Ad_list, *Bd_list), None
-
-    elif method_name == "zoh2":
-        Ad_list, Bd_list = zip(*[Ad_Bd_from_dt(dt_k, A, B) for dt_k in dts_torch])
-        LQs_list, LRs_list = LQs_LRs_from_dt(dts_torch, Q, R)
-        return layer(*Ad_list, *Bd_list, *LQs_list, *LRs_list), None
-
-    elif method_name == "zoh3":
         Ad_list, Bd_list, Lx_list, Lu_list, W_list = [], [], [], [], []
         for k in range(n):
             Ad_k, Bd_k, W_k = zoh_cost_matrices(dts_torch[k], A_t, B_t, Q_t, R_t)
@@ -218,7 +200,7 @@ def _compute_loss(method_name, sol, dts_torch, n, W_list, s0_t, A_t, B_t, Q_t, R
     # CvxpyLayer may return float64; cast to match dts dtype for consistency
     dtype = dts_torch.dtype
 
-    if method_name in ("rep", "zoh", "zoh2"):
+    if method_name == "rep":
         states_sol = [sol[i].to(dtype) for i in range(n)]
         inputs_sol = [sol[n + i].to(dtype) for i in range(n)]
         return task_loss(states_sol, inputs_sol, dts_torch, Q, R, method="time_scaled")
@@ -237,7 +219,7 @@ def _compute_loss(method_name, sol, dts_torch, n, W_list, s0_t, A_t, B_t, Q_t, R
             n_sub=10, use_exact=False,
         )
 
-    elif method_name == "zoh3":
+    elif method_name == "zoh":
         s0_t_local = s0_t
         loss = torch.tensor(0.0, dtype=dtype)
         for k in range(n):
@@ -259,13 +241,9 @@ def _pickle_names(method_name, n, n_default):
     elif method_name == "hs_substeps":
         return "sol_hs", "history_hs", "dts_dist_hs_substeps"
     elif method_name == "zoh":
-        return "sol_zoh", "history_zoh", "dts_dist_zoh"
-    elif method_name == "zoh2":
-        return "sol_zoh_2", "history_zoh_2", "dts_dist_zoh_2"
-    elif method_name == "zoh3":
-        sol_name = pickle_name("sol_zoh_3", n, n_default)
-        hist_name = pickle_name("history_zoh_3", n, n_default)
-        dist_name = pickle_name("dts_dist_zoh_3", n, n_default)
+        sol_name = pickle_name("sol_zoh", n, n_default)
+        hist_name = pickle_name("history_zoh", n, n_default)
+        dist_name = pickle_name("dts_dist_zoh", n, n_default)
         return sol_name, hist_name, dist_name
     raise ValueError(f"Unknown method: {method_name}")
 
@@ -275,9 +253,7 @@ _INTERNAL_METHOD_KEY = {
     "rep": "time scaled",
     "hs_uniform": "uniform_resample",
     "hs_substeps": "substeps",
-    "zoh": "time scaled",
-    "zoh2": "time scaled",
-    "zoh3": "exact_zoh_integrated",
+    "zoh": "exact_zoh_integrated",
 }
 
 
@@ -285,12 +261,12 @@ def train_softmax_method(method_name, n, n_epochs, lr, data_dir, n_default=160):
     """Train a softmax-based method.
 
     Args:
-        method_name: one of "rep", "hs_uniform", "hs_substeps", "zoh", "zoh2", "zoh3"
+        method_name: one of "rep", "hs_uniform", "hs_substeps", "zoh"
         n: number of timesteps
         n_epochs: number of training epochs
         lr: learning rate
         data_dir: directory for pickle output
-        n_default: default n for pickle naming (used by zoh3)
+        n_default: default n for pickle naming (used by zoh)
 
     Returns:
         sol: solution dict or tensors
