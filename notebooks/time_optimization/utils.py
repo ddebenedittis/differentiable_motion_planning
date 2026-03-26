@@ -27,6 +27,14 @@ DEFAULT_EPOCHS = {
     "zoh": 300,
     "zoh2": 500,
     "zoh3": 500,
+    "L_IV": 500,
+    "L_EQ": 500,
+    "L_CPC": 500,
+    "L_CSS": 500,
+    "L_defect": 500,
+    "L_dyn": 500,
+    "L_equi": 500,
+    "L_FI": 500,
 }
 
 TEST_EPOCHS = 5
@@ -356,6 +364,188 @@ def evaluate_continuous_cost(inputs_qp, dts, s0, A, B, Q, R, T, n_eval=10000):
 
 
 # ============================================================================ #
+# Alternative Loss Functions (Regularizers)
+# ============================================================================ #
+
+def loss_iv(inputs, dts):
+    """L_IV = sum_{k=0}^{n-2} dt_k * ||u_{k+1} - u_k||^2
+
+    Weighted input variation: penalizes large input changes in long intervals.
+    """
+    u_stack = torch.stack(inputs)          # (n, n_u)
+    du = torch.diff(u_stack, dim=0)        # (n-1, n_u)
+    return torch.sum(dts[:-1] * torch.sum(du**2, dim=1))
+
+
+def loss_eq(inputs):
+    """L_EQ = sum_k (w_k - w_bar)^2 where w_k = ||u_{k+1} - u_k||^2
+
+    Input equidistribution: encourages uniform input variation across intervals.
+    """
+    u_stack = torch.stack(inputs)
+    w = torch.sum(torch.diff(u_stack, dim=0)**2, dim=1)  # (n-1,)
+    return torch.sum((w - w.mean())**2)
+
+
+def loss_cpc(inputs, dts, u_max, tau=0.1, epsilon=0.05):
+    """L_CPC = sum_k sigmoid((|u_k| - u_max + epsilon) / tau) * dt_k^2
+
+    Constraint proximity concentration: shortens intervals near active constraints.
+    """
+    u_stack = torch.stack(inputs)                         # (n, n_u)
+    u_abs = torch.abs(u_stack).max(dim=1).values          # (n,)
+    phi = torch.sigmoid((u_abs - u_max + epsilon) / tau)
+    return torch.sum(phi * dts**2)
+
+
+def loss_css(inputs, dts, u_max, alpha=1.0, tau=0.1):
+    """L_CSS = sum_k (a_{k+1} - a_k)^2 * dt_k^2
+
+    Constraint switching sharpness: concentrates samples at constraint transitions.
+    """
+    u_stack = torch.stack(inputs)
+    u_abs = torch.abs(u_stack).max(dim=1).values
+    a = torch.tanh((u_abs / u_max - alpha) / tau)         # (n,)
+    da = torch.diff(a)                                     # (n-1,)
+    return torch.sum(da**2 * dts[:-1]**2)
+
+
+def loss_defect(states, inputs, dts, W_list, Q, R):
+    """L_defect = sum_k (z_k'W_k z_k - dt_k*(s_k'Qs_k + u_k'Ru_k))^2
+
+    Intra-interval cost defect: penalizes mismatch between exact integrated cost
+    and Riemann-sum approximation.
+    """
+    _dtype = states[0].dtype
+    Q_t = torch.as_tensor(Q, dtype=_dtype)
+    R_t = torch.as_tensor(R, dtype=_dtype)
+    total = torch.tensor(0.0, dtype=_dtype)
+    for k in range(len(inputs)):
+        z_k = torch.cat([states[k], inputs[k]])
+        vl_cost = z_k @ W_list[k] @ z_k
+        ri_cost = dts[k] * (states[k] @ Q_t @ states[k] + inputs[k] @ R_t @ inputs[k])
+        total = total + (vl_cost - ri_cost)**2
+    return total
+
+
+def loss_dyn(states, inputs, dts, A, B, Ad_list, Bd_list):
+    """L_dyn = sum_k ||e_k||^2 / dt_k
+
+    Dynamics consistency: penalizes deviation of ZOH discretization from Euler.
+    e_k = (Ad_k - I - dt_k*A)x_k + (Bd_k - dt_k*B)u_k
+    """
+    I_ns = torch.eye(A.shape[0], dtype=A.dtype)
+    total = torch.tensor(0.0, dtype=A.dtype)
+    for k in range(len(inputs)):
+        e_k = (Ad_list[k] - I_ns - dts[k] * A) @ states[k] + (Bd_list[k] - dts[k] * B) @ inputs[k]
+        total = total + torch.sum(e_k**2) / dts[k]
+    return total
+
+
+def loss_equi(states, inputs, dts, A, B, Q, eps=1e-10):
+    """Log-variance of midpoint prediction error.
+
+    Equidistributed information: encourages uniform prediction error across intervals.
+    """
+    Q_t = torch.as_tensor(Q, dtype=A.dtype)
+    I_list = []
+    for k in range(len(inputs)):
+        Ad_h, Bd_h = zoh_discretize(dts[k] / 2, A, B)
+        x_mid = Ad_h @ states[k] + Bd_h @ inputs[k]
+        x_hat = (states[k] + states[k + 1]) / 2
+        diff = x_mid - x_hat
+        I_k = diff @ Q_t @ diff
+        I_list.append(I_k)
+    I_t = torch.stack(I_list)
+    log_I = torch.log(I_t + eps)
+    return torch.sum((log_I - log_I.mean())**2)
+
+
+def loss_fi(states, inputs, dts, A, B, Q, T, detach_target=True, eps=1e-10):
+    """L_FI = D_KL(q || p) where q is velocity-based target, p = dt/T.
+
+    Fisher information KL: drives timestep distribution toward velocity-weighted
+    distribution.
+    """
+    Q_t = torch.as_tensor(Q, dtype=A.dtype)
+    F_list = []
+    for k in range(len(inputs)):
+        v = A @ states[k + 1] + B @ inputs[k]
+        F_k = v @ Q_t @ v
+        F_list.append(F_k)
+    F = torch.stack(F_list)
+    inv_sqrt_F = 1.0 / torch.sqrt(F + eps)
+    q = inv_sqrt_F / inv_sqrt_F.sum()
+    if detach_target:
+        q = q.detach()
+    p = dts / T
+    return torch.sum(q * torch.log(q / (p + eps)))
+
+
+LOSS_REGISTRY = {
+    "L_IV": loss_iv,
+    "L_EQ": loss_eq,
+    "L_CPC": loss_cpc,
+    "L_CSS": loss_css,
+    "L_defect": loss_defect,
+    "L_dyn": loss_dyn,
+    "L_equi": loss_equi,
+    "L_FI": loss_fi,
+}
+
+
+# ============================================================================ #
+# Adaptive Gradient Balancing
+# ============================================================================ #
+
+class AdaptiveGradientBalancer:
+    """Strategy 5A: balance L_ocp and L_reg gradient magnitudes via EMA.
+
+    Two probe backward passes per step to estimate gradient norms, then
+    returns lambda_hat = lambda_0 * EMA(||grad_ocp||) / EMA(||grad_reg||).
+    Caller must do the final combined backward after calling step().
+    """
+
+    def __init__(self, lambda_0=0.3, ema_decay=0.99, eps=1e-8):
+        self.lambda_0 = lambda_0
+        self.ema_decay = ema_decay
+        self.eps = eps
+        self.ema_ocp = None
+        self.ema_reg = None
+
+    def step(self, theta, loss_ocp, loss_reg):
+        """Probe gradients and return adaptive lambda_hat.
+
+        Args:
+            theta: the parameter tensor (theta for softmax simplex)
+            loss_ocp: scalar tensor for the OCP loss
+            loss_reg: scalar tensor for the regularizer loss
+
+        Returns:
+            lambda_hat: scalar weight for the regularizer
+        """
+        # Probe L_ocp gradient
+        loss_ocp.backward(retain_graph=True)
+        g_ocp = theta.grad.abs().max().item()
+        theta.grad = None
+
+        # Probe L_reg gradient
+        loss_reg.backward(retain_graph=True)
+        g_reg = theta.grad.abs().max().item()
+        theta.grad = None
+
+        # Update EMA
+        if self.ema_ocp is None:
+            self.ema_ocp, self.ema_reg = g_ocp, g_reg
+        else:
+            d = self.ema_decay
+            self.ema_ocp = d * self.ema_ocp + (1 - d) * g_ocp
+            self.ema_reg = d * self.ema_reg + (1 - d) * g_reg
+
+        return self.lambda_0 * self.ema_ocp / (self.ema_reg + self.eps)
+
+
+# ============================================================================ #
 # Visualization
 # ============================================================================ #
 
@@ -503,6 +693,87 @@ def load_pickle(out_dir, name):
     """Load data from a pickle file."""
     with open(os.path.join(out_dir, f"{name}.pkl"), "rb") as f:
         return pickle.load(f)
+
+
+def save_dts_distribution(out_dir, name, history):
+    """Save full dts distribution across all epochs as a numpy array.
+
+    Args:
+        out_dir: output directory
+        name: pickle file name (without .pkl extension)
+        history: list of history dicts, each containing a 'dts' key
+
+    Returns:
+        dts_all: numpy array of shape (n_epochs, n)
+    """
+    dts_all = np.stack([np.array(h['dts']).flatten() for h in history])
+    save_pickle(out_dir, name, dts_all)
+    return dts_all
+
+
+def save_timesteps_video(out_dir, name, history=None, T=None, fps=15, dpi=100,
+                         dts_all=None):
+    """Save animation of timestep distribution evolution to mp4 (or gif fallback).
+
+    Args:
+        out_dir: output directory
+        name: output file name (without extension)
+        history: list of history dicts with 'dts' key (used if dts_all is None)
+        T: total time horizon (inferred from dts_all if None)
+        fps: frames per second
+        dpi: resolution
+        dts_all: numpy array of shape (n_epochs, n), alternative to history
+
+    Returns:
+        out_path: path to the saved video file
+    """
+    import matplotlib.animation as animation
+
+    if dts_all is None:
+        dts_all = np.stack([np.array(h['dts']).flatten() for h in history])
+    if T is None:
+        T = float(dts_all[0].sum())
+    n_epochs, n = dts_all.shape
+    times_all = np.cumsum(dts_all, axis=1)
+
+    dt_min = dts_all.min() * 0.9
+    dt_max = dts_all.max() * 1.1
+    dt_uniform = T / n
+
+    fig, ax = plt.subplots(figsize=(6.4, 3.2))
+    (line,) = ax.plot([], [], 'b-', linewidth=1.2)
+    ax.set_xlim(0, T)
+    ax.set_ylim(dt_min, dt_max)
+    ax.set_xlabel("Time")
+    ax.set_ylabel("Timestep duration")
+    ax.axhline(dt_uniform, color='gray', linestyle='--', alpha=0.5, label='uniform')
+    ax.legend(fontsize=8)
+    title = ax.set_title("Epoch 0")
+    fig.set_constrained_layout(True)
+
+    def init():
+        line.set_data([], [])
+        return line, title
+
+    def update(frame):
+        line.set_data(times_all[frame], dts_all[frame])
+        title.set_text(f"Epoch {frame}")
+        return line, title
+
+    anim = animation.FuncAnimation(
+        fig, update, frames=np.arange(n_epochs),
+        init_func=init, blit=True, interval=1000 / fps,
+    )
+
+    out_path = os.path.join(out_dir, f"{name}.mp4")
+    try:
+        anim.save(out_path, fps=fps, dpi=dpi, writer='ffmpeg')
+    except Exception:
+        out_path = os.path.join(out_dir, f"{name}.gif")
+        anim.save(out_path, fps=fps, dpi=dpi, writer='pillow')
+
+    plt.close(fig)
+    return out_path
 
 
 # ============================================================================ #

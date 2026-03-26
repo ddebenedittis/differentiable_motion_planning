@@ -1,7 +1,11 @@
 __marimo__
 __pycache__
 c_generated_code
+plans
 .venv
+
+data
+results
 
 *.csv
 *.html
@@ -9,3 +13,4 @@ c_generated_code
 *.pkl
 *.png
 acados_ocp.json
+.worktrees/

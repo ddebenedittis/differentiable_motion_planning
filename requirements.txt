@@ -1,5 +1,7 @@
 cvxpylayers
 marimo
 matplotlib
+ipympl
 plotly
 torch
+tqdm

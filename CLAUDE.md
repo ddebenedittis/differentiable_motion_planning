@@ -1,7 +1,5 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
 ## Project Overview
 
 DIMP (Differentiable Motion Planning) is a research project implementing differentiable trajectory optimization for robotic systems. It uses cvxpylayers to enable backpropagation through convex optimization problems, allowing end-to-end learning with motion planning.
@@ -90,5 +88,7 @@ constraints = robot.dt_dynamics_constraint()
 - `gain_optimization/n_ode.ipynb` — Neural ODE learning of unicycle dynamics
 - `gain_optimization/mro_g2g.ipynb` — Multi-robot go-to-goal
 - `gain_optimization/unicycle_acados.ipynb` — Acados real-time optimal control
-- `time_optimization/pann_clqr_dt.ipynb` — Differentiable time optimization (main reference)
+- `time_optimization/pann_clqr_dt.py` — Data generation script (training + pickle saving)
+- `time_optimization/plot_pann_clqr_dt.py` — Visualization script (loads pickles, produces plots)
+- `time_optimization/run_alt_losses.py` — Alternative loss function experiments
 

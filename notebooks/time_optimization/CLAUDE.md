@@ -30,7 +30,28 @@ Instead of uniform timesteps, make $\Delta t_k$ learnable parameters optimized t
 - **Significance bounds**: $\pm 1.96/\sqrt{n}$ for 95% CI (values outside = statistically significant)
 
 ## Local Files
-- **`pann_clqr_dt.ipynb`** — Main notebook with all experiments
-- **`pann_clqr.py`** — Problem definition and system matrices
-- **`utils.py`** — Shared utilities for this topic (resampling, plotting helpers)
-- **`data/`** — Pickle files with saved results. Set `rerun=True` in notebook to regenerate.
+- **`pann_clqr_dt.py`** — Data generation script: trains all 6 methods, saves pickles to `data/pann_clqr_dt/`
+- **`plot_pann_clqr_dt.py`** — Visualization script: loads pickles, produces plots in `results/pann_clqr_dt/`
+- **`run_alt_losses.py`** — Alternative loss function experiments (ZOH3 base + regularizer losses)
+- **`pann_clqr.py`** — QP builders (CVXPY problem definitions + CvxpyLayer wrappers)
+- **`utils.py`** — Shared utilities (discretization, loss functions, plotting, I/O)
+- **`data/`** — Pickle files with saved results
+- **`results/`** — Generated plots and figures
+
+### Script Usage
+```bash
+# Train all methods (5 test epochs)
+python pann_clqr_dt.py --mode test --method all
+
+# Train specific methods (full run)
+python pann_clqr_dt.py --mode full --method rep zoh3
+
+# Generate all plots from saved data
+python plot_pann_clqr_dt.py
+
+# Only cross-method analysis plots
+python plot_pann_clqr_dt.py --analysis-only
+
+# Include baseline sweep
+python plot_pann_clqr_dt.py --baseline
+```
