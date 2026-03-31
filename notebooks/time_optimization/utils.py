@@ -24,9 +24,7 @@ DEFAULT_EPOCHS = {
     "aux": 100,
     "rep": 200,
     "hs": 400,
-    "zoh": 300,
-    "zoh2": 500,
-    "zoh3": 500,
+    "zoh": 500,
     "L_IV": 200,
     "L_EQ": 200,
     "L_CPC": 200,
@@ -35,6 +33,7 @@ DEFAULT_EPOCHS = {
     "L_dyn": 200,
     "L_equi": 200,
     "L_FI": 200,
+    "L_SC": 200,
 }
 
 TEST_EPOCHS = 5
@@ -482,6 +481,34 @@ def loss_fi(states, inputs, dts, A, B, Q, T, detach_target=True, eps=1e-10):
     return torch.sum(q * torch.log(q / (p + eps)))
 
 
+def loss_sc(states, inputs, dts, A, B, x_max, n_sub=5):
+    """L_SC: intra-interval state-constraint penalty.
+
+    Simulates the ZOH trajectory at n_sub sub-points within each interval
+    and penalizes squared constraint violations that the QP cannot see.
+
+    Args:
+        states: list of n+1 torch tensors (error-coord states at sample points)
+        inputs: list of n torch tensors (inputs per interval)
+        dts: (n,) torch tensor of timestep durations
+        A: (n_s, n_s) continuous-time state matrix
+        B: (n_s, n_u) continuous-time input matrix
+        x_max: dict {state_index: bound} — box constraints on states
+        n_sub: number of sub-intervals per QP interval (default 5)
+    """
+    total = torch.tensor(0.0, dtype=A.dtype)
+    for k in range(len(inputs)):
+        dt_sub = dts[k] / n_sub
+        Ad_sub, Bd_sub = zoh_discretize(dt_sub, A, B)
+        x_m = states[k]
+        for m in range(1, n_sub):  # skip m=0 (enforced by QP)
+            x_m = Ad_sub @ x_m + Bd_sub @ inputs[k]
+            for idx, bound in x_max.items():
+                violation = torch.relu(x_m[idx].abs() - bound)
+                total = total + violation ** 2
+    return total
+
+
 LOSS_REGISTRY = {
     "L_IV": loss_iv,
     "L_EQ": loss_eq,
@@ -491,6 +518,7 @@ LOSS_REGISTRY = {
     "L_dyn": loss_dyn,
     "L_equi": loss_equi,
     "L_FI": loss_fi,
+    "L_SC": loss_sc,
 }
 
 
