@@ -85,7 +85,9 @@ def save_run_config(data_dir, args):
 def build_loss_kwargs(loss_name, states, inputs, dts, W_list, Ad_list, Bd_list,
                       A_t, B_t, Q_t, R_t, T_val, u_max_val):
     """Dispatch correct kwargs to each loss function."""
-    if loss_name == "L_IV":
+    if loss_name == "L_SSD":
+        return dict(dts=dts)
+    elif loss_name == "L_IV":
         return dict(inputs=inputs, dts=dts)
     elif loss_name == "L_EQ":
         return dict(inputs=inputs)

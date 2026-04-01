@@ -34,6 +34,7 @@ DEFAULT_EPOCHS = {
     "L_equi": 200,
     "L_FI": 200,
     "L_SC": 200,
+    "L_PWLH": 200,
 }
 
 TEST_EPOCHS = 5
@@ -366,6 +367,15 @@ def evaluate_continuous_cost(inputs_qp, dts, s0, A, B, Q, R, T, n_eval=10000):
 # Alternative Loss Functions (Regularizers)
 # ============================================================================ #
 
+def loss_ssd(dts):
+    """L_SSD = sum_k dt_k^2
+
+    Sum of squared durations: minimized when all dt_k are equal (given fixed sum),
+    penalizes non-uniform timestep distributions.
+    """
+    return torch.sum(dts ** 2)
+
+
 def loss_iv(inputs, dts):
     """L_IV = sum_{k=0}^{n-2} dt_k * ||u_{k+1} - u_k||^2
 
@@ -509,7 +519,49 @@ def loss_sc(states, inputs, dts, A, B, x_max, n_sub=5):
     return total
 
 
+def loss_pwlh(states, inputs, dts, A, B, Q, R, n_sub=10):
+    """L_PWLH: continuous cost under piecewise-linear input interpolation.
+
+    Evaluates the quadratic cost by linearly interpolating the input between
+    consecutive QP sample points and simulating the state at n_sub ZOH substeps
+    within each interval.
+
+    Compared to the ZOH cost (L_OCP, which holds the input constant), the PWLH
+    cost captures how the input varies within intervals.  Its gradient w.r.t.
+    dt_k is informative in transition regions where |u_{k+1} - u_k| is large,
+    providing a signal to concentrate samples there.
+
+    Args:
+        states: list of n+1 torch tensors (error-coord states at sample points)
+        inputs: list of n torch tensors (QP inputs, one per interval)
+        dts: (n,) torch tensor of timestep durations
+        A: (n_s, n_s) continuous-time state matrix
+        B: (n_s, n_u) continuous-time input matrix
+        Q: (n_s, n_s) state cost matrix
+        R: (n_u, n_u) input cost matrix
+        n_sub: number of ZOH substeps per interval (default 10)
+    """
+    _dtype = states[0].dtype
+    Q_t = torch.as_tensor(Q, dtype=_dtype)
+    R_t = torch.as_tensor(R, dtype=_dtype)
+    total = torch.tensor(0.0, dtype=_dtype)
+    n = len(inputs)
+    for k in range(n):
+        dt_sub = dts[k] / n_sub
+        Ad_sub, Bd_sub = zoh_discretize(dt_sub, A, B)
+        x_m = states[k]
+        # PWLH: interpolate toward next input; hold at last interval.
+        u_next = inputs[k + 1] if k + 1 < n else inputs[k]
+        for m in range(n_sub):
+            alpha = m / n_sub
+            u_m = inputs[k] + alpha * (u_next - inputs[k])
+            total = total + dt_sub * (x_m @ Q_t @ x_m + u_m @ R_t @ u_m)
+            x_m = Ad_sub @ x_m + Bd_sub @ u_m
+    return total
+
+
 LOSS_REGISTRY = {
+    "L_SSD": loss_ssd,
     "L_IV": loss_iv,
     "L_EQ": loss_eq,
     "L_CPC": loss_cpc,
@@ -519,6 +571,7 @@ LOSS_REGISTRY = {
     "L_equi": loss_equi,
     "L_FI": loss_fi,
     "L_SC": loss_sc,
+    "L_PWLH": loss_pwlh,
 }
 
 
