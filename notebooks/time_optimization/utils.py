@@ -35,6 +35,7 @@ DEFAULT_EPOCHS = {
     "L_FI": 200,
     "L_SC": 200,
     "L_PWLH": 200,
+    "L_SSD": 200,
 }
 
 TEST_EPOCHS = 5
@@ -690,7 +691,7 @@ def _extract_dts(sol, history, n, sol_method):
 
 
 def plot_training_res(sol, history, n, sol_method):
-    """Plot training results: loss, colored input, state/input trajectories, timesteps.
+    """Plot training results (2x2 grid): loss, timesteps, state, colored input.
 
     Args:
         sol: solution tensors (list of torch tensors)
@@ -702,23 +703,20 @@ def plot_training_res(sol, history, n, sol_method):
     u_arr = np.array([u.detach().numpy().tolist() for u in sol[n:2 * n]])
     d_arr = _extract_dts(sol, history, n, sol_method)
 
-    fig, ax = plt.subplots(2, 3, figsize=(9.6, 9.6))
+    fig, ax = plt.subplots(2, 2, figsize=(6.4, 6.4))
     ax[0, 0].plot([h['loss'] for h in history])
     ax[0, 0].set_xlabel("Epoch")
     ax[0, 0].set_ylabel("Loss")
     ax[0, 0].set_title("Loss Evolution")
 
-    plot_colored(d_arr, u_arr, ax[1, 0])
+    ax[0, 1].step(np.cumsum(d_arr), d_arr, where='pre')
+    ax[0, 1].set_xlabel("Time")
+    ax[0, 1].set_ylabel("Timestep duration")
+    ax[0, 1].set_title("Timesteps Evolution")
 
-    plot_timegrid(d_arr, s_arr, ax[0, 1], ylabel="State", title="State Evolution")
-    plot_timegrid(d_arr, u_arr, ax[1, 1], ylabel="Input", title="Input Evolution")
+    plot_timegrid(d_arr, s_arr, ax[1, 0], ylabel="State", title="State Evolution")
+    plot_colored(d_arr, u_arr, ax[1, 1])
 
-    ax[0, 2].plot(np.cumsum(d_arr), d_arr)
-    ax[0, 2].set_xlabel("Time")
-    ax[0, 2].set_ylabel("Timestep duration")
-    ax[0, 2].set_title("Timesteps Evolution")
-
-    fig.delaxes(ax[1, 2])
     fig.set_constrained_layout(True)
 
 
@@ -750,7 +748,7 @@ def save_training_res(out_dir, exp_name, sol, history, n, sol_method):
     plt.close(fig)
 
     fig, ax = plt.subplots(1, 1, figsize=(3.2, 3.2))
-    ax.plot(np.cumsum(d_arr), d_arr)
+    ax.step(np.cumsum(d_arr), d_arr, where='pre')
     ax.set_xlabel("Time")
     ax.set_ylabel("Timestep duration")
     fig.savefig(f"{exp_dir}/timesteps.pdf", bbox_inches='tight')

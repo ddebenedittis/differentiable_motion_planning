@@ -14,6 +14,9 @@ Usage:
 import argparse
 import json
 import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -79,7 +82,7 @@ def load_all_results(data_dir, loss_names=None):
 # ============================================================================ #
 
 def plot_loss_results(loss_name, result, n, results_dir, show=False):
-    """Plot training results for a single loss (2x3 grid)."""
+    """Plot training results for a single loss (2x2 grid)."""
     sol = result["sol"]
     history = result["history"]
 
@@ -314,7 +317,7 @@ def main():
 
     args = parser.parse_args()
 
-    script_dir = os.path.dirname(os.path.abspath(__file__))
+    script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     data_dir = args.data_dir or os.path.join(script_dir, "data", "alt_losses")
     results_dir = args.results_dir or os.path.join(script_dir, "results", "alt_losses")
     os.makedirs(results_dir, exist_ok=True)

@@ -14,6 +14,9 @@ import argparse
 import json
 import os
 import subprocess
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 import torch
@@ -254,7 +257,7 @@ def main():
 
     run_mode = RunMode.TEST if args.mode == "test" else RunMode.FULL
 
-    script_dir = os.path.dirname(os.path.abspath(__file__))
+    script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     data_dir = args.data_dir or os.path.join(script_dir, "data", "alt_losses")
     os.makedirs(data_dir, exist_ok=True)
 

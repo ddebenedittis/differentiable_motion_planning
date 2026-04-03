@@ -27,42 +27,64 @@ Instead of uniform timesteps, make $\Delta t_k$ learnable parameters optimized t
 - **Cross-correlation**: Time-lagged correlation between sampling density and $|\Delta u|$, $|\Delta s|$, $|u|$, $|s|$, $t$
 - **Significance bounds**: $\pm 1.96/\sqrt{n}$ for 95% CI (values outside = statistically significant)
 
-## Local Files
-- **`pann_clqr_dt.py`** — Data generation script: trains all 6 methods, saves pickles to `data/pann_clqr_dt/`
-- **`plot_pann_clqr_dt.py`** — Visualization script: loads pickles, produces plots in `results/pann_clqr_dt/`
-- **`alt_losses.py`** — Data generation for alternative loss experiments (ZOH base + regularizer losses)
-- **`plot_alt_losses.py`** — Visualization for alternative loss experiments (loads pickles, produces plots)
+## Directory Structure
+
+Files are organized into example-specific subfolders. `utils.py`, `data/`, and `results/` remain shared at the top level.
+
+### `pann_clqr/` — Pannocchia CLQR example
 - **`pann_clqr.py`** — QP builders (CVXPY problem definitions + CvxpyLayer wrappers)
+- **`pann_clqr_dt.py`** — Data generation: trains all 6 methods, saves pickles to `data/pann_clqr_dt/`
+- **`plot_pann_clqr_dt.py`** / **`plot_pann_clqr_dt.ipynb`** — Visualization: loads pickles, produces plots in `results/pann_clqr_dt/`
+- **`alt_losses.py`** — Data generation for alternative loss experiments, saves to `data/alt_losses/`
+- **`plot_alt_losses.py`** / **`plot_alt_losses.ipynb`** — Visualization for alternative loss experiments
+
+### `invpend/` — Inverted pendulum example
+- **`invpend_clqr.py`** — QP builders for linearized cart-pole
+- **`invpend_dt.py`** — Data generation: trains methods/losses, saves to `data/invpend_dt/`
+- **`plot_invpend_dt.py`** / **`plot_invpend_dt.ipynb`** — Visualization: loads pickles, produces plots in `results/invpend_dt/`
+
+### Shared (top level)
 - **`utils.py`** — Shared utilities (discretization, loss functions, plotting, I/O)
-- **`data/`** — Pickle files with saved results
-- **`results/`** — Generated plots and figures
+- **`data/`** — Pickle files with saved results (subdirs per example)
+- **`results/`** — Generated plots and figures (subdirs per example)
 
 ### Script Usage
 ```bash
+# --- pann_clqr example ---
 # Train all methods (5 test epochs)
-python pann_clqr_dt.py --mode test --method all
+python pann_clqr/pann_clqr_dt.py --mode test --method all
 
 # Train specific methods (full run)
-python pann_clqr_dt.py --mode full --method rep zoh
+python pann_clqr/pann_clqr_dt.py --mode full --method rep zoh
 
 # Generate all plots from saved data
-python plot_pann_clqr_dt.py
+python pann_clqr/plot_pann_clqr_dt.py
 
 # Only cross-method analysis plots
-python plot_pann_clqr_dt.py --analysis-only
+python pann_clqr/plot_pann_clqr_dt.py --analysis-only
 
 # Include baseline sweep
-python plot_pann_clqr_dt.py --baseline
+python pann_clqr/plot_pann_clqr_dt.py --baseline
 
 # Alternative losses: train specific losses (test)
-python alt_losses.py --mode test --loss L_IV L_FI
+python pann_clqr/alt_losses.py --mode test --loss L_IV L_FI
 
 # Alternative losses: train all (full run)
-python alt_losses.py --mode full --loss all
+python pann_clqr/alt_losses.py --mode full --loss all
 
 # Alternative losses: generate plots
-python plot_alt_losses.py
+python pann_clqr/plot_alt_losses.py
 
 # Alternative losses: only analysis plots
-python plot_alt_losses.py --analysis-only
+python pann_clqr/plot_alt_losses.py --analysis-only
+
+# --- invpend example ---
+# Train all experiments (test)
+python invpend/invpend_dt.py --mode test --experiment all
+
+# Train specific method (full run)
+python invpend/invpend_dt.py --mode full --experiment methods --method rep
+
+# Generate all plots
+python invpend/plot_invpend_dt.py
 ```

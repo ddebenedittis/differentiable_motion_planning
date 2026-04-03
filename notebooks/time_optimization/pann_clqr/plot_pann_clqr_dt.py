@@ -13,7 +13,10 @@ Usage:
 
 import argparse
 import os
+import sys
 import time
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dataclasses import dataclass
 
 import matplotlib.pyplot as plt
@@ -439,7 +442,7 @@ def main():
 
     args = parser.parse_args()
 
-    script_dir = os.path.dirname(os.path.abspath(__file__))
+    script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     data_dir = args.data_dir or os.path.join(script_dir, "data", "pann_clqr_dt")
     results_dir = args.results_dir or os.path.join(script_dir, "results", "pann_clqr_dt")
     os.makedirs(results_dir, exist_ok=True)

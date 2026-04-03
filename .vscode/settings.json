@@ -1,7 +1,9 @@
 {
-    "python.defaultInterpreterPath": ".venv/bin/python",
+    "python.defaultInterpreterPath": "/home/davide/.venv/bin/python",
+    "python.venvPath": "/home/davide",
+    "python.venvFolders": [".venv"],
     "python.envFile": "${workspaceFolder}/.env",
-    "marimo.pythonPath": ".venv/bin/python",
+    "marimo.pythonPath": "/home/davide/.venv/bin/python",
     "pylint.args": [
         "--disable=missing-docstring",
         "--disable=redefined-builtin",

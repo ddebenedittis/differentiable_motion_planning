@@ -14,7 +14,10 @@ Usage:
 import argparse
 import json
 import os
+import sys
 import time
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dataclasses import dataclass
 
 import matplotlib.pyplot as plt
@@ -114,10 +117,18 @@ def load_method_results(data_dir):
 def load_loss_results(data_dir, loss_names=None):
     """Load all available loss results from pickle files.
 
+    Args:
+        loss_names: None (no losses), "all" (all available), or list of names.
+
     Returns:
         results: dict of {loss_name: {"sol": ..., "history": ...}}
     """
-    candidates = loss_names or list(LOSS_REGISTRY.keys())
+    if loss_names is None:
+        return {}
+    if loss_names == "all":
+        candidates = list(LOSS_REGISTRY.keys())
+    else:
+        candidates = loss_names
     results = {}
 
     for loss_name in candidates:
@@ -488,7 +499,7 @@ def plot_cross_correlation_analysis(method_solutions, colors, results_dir,
 # ============================================================================ #
 
 def plot_loss_results(loss_name, result, results_dir, show=False):
-    """Plot training results for a single loss (2x3 grid)."""
+    """Plot training results for a single loss (2x2 grid)."""
     sol = result["sol"]
     history = result["history"]
     n = result["n"]
@@ -628,7 +639,7 @@ def main():
 
     args = parser.parse_args()
 
-    script_dir = os.path.dirname(os.path.abspath(__file__))
+    script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     data_dir = args.data_dir or os.path.join(script_dir, "data", "invpend_dt")
     results_dir = (args.results_dir
                    or os.path.join(script_dir, "results", "invpend_dt"))
@@ -682,9 +693,107 @@ def main():
                         show=args.show,
                     )
 
+        # Uniform-timestep baseline
+        if method_results:
+            n_uniform = next(iter(method_results.values()))["n"]
+        elif loss_results:
+            n_uniform = next(iter(loss_results.values()))["n"]
+        else:
+            n_uniform = 80
+        dt_uniform = T / n_uniform
+        try:
+            prob, s_base, u_base = create_invpend_baseline_clqr(
+                n_uniform, s0, A, B, Q, R, dt_uniform, u_max, x_max, s_goal,
+            )
+            prob.solve()
+            if prob.status in ("optimal", "optimal_inaccurate"):
+                print(f"--- Uniform: OCP cost ---")
+                print(f"  n={n_uniform}, cost={prob.objective.value:.6f}")
+                # Build arrays for trajectory plot
+                dts_uniform = np.full(n_uniform, dt_uniform)
+                e_arr = np.array([s_base[i + 1].value.flatten()
+                                  for i in range(n_uniform)])
+                s_arr = np.vstack([s0, e_arr + s_goal])
+                u_arr = np.array([u_base[i].value.flatten()
+                                  for i in range(n_uniform)])
+                u_arr_plot = np.vstack([u_arr[:1], u_arr])
+                times = np.concatenate([[0.0], np.cumsum(dts_uniform)])
+
+                fig, axs = plt.subplots(2, 3, figsize=(12.8, 6.4),
+                                        constrained_layout=True)
+
+                def _vlines(ax):
+                    for t_val in times:
+                        ax.axvline(t_val, color='gray', linestyle='-',
+                                   alpha=0.08, linewidth=0.5)
+
+                axs[0, 0].plot(times, s_arr[:, 0])
+                axs[0, 0].axhline(s_goal[0], color='gray', ls='--', alpha=0.5,
+                                   label=f'goal={s_goal[0]}')
+                axs[0, 0].set(xlabel='Time [s]', ylabel='x [m]',
+                              title='Position')
+                axs[0, 0].legend(fontsize=7)
+                _vlines(axs[0, 0])
+
+                axs[0, 1].plot(times, s_arr[:, 2])
+                axs[0, 1].axhline(theta_max, color='r', ls='--', alpha=0.5,
+                                   label=r'$\pm\theta_{\max}$')
+                axs[0, 1].axhline(-theta_max, color='r', ls='--', alpha=0.5)
+                axs[0, 1].set(xlabel='Time [s]', ylabel=r'$\theta$ [rad]',
+                              title='Angle')
+                axs[0, 1].legend(fontsize=7)
+                _vlines(axs[0, 1])
+
+                axs[1, 0].plot(times, s_arr[:, 1])
+                axs[1, 0].axhline(v_max, color='r', ls='--', alpha=0.5,
+                                   label=r'$\pm v_{\max}$')
+                axs[1, 0].axhline(-v_max, color='r', ls='--', alpha=0.5)
+                axs[1, 0].set(xlabel='Time [s]', ylabel=r'$\dot{x}$ [m/s]',
+                              title='Velocity')
+                axs[1, 0].legend(fontsize=7)
+                _vlines(axs[1, 0])
+
+                axs[1, 1].plot(times, u_arr_plot.flatten())
+                axs[1, 1].axhline(u_max, color='r', ls='--', alpha=0.5,
+                                   label=r'$\pm F_{\max}$')
+                axs[1, 1].axhline(-u_max, color='r', ls='--', alpha=0.5)
+                axs[1, 1].set(xlabel='Time [s]', ylabel='F [N]',
+                              title='Force')
+                axs[1, 1].legend(fontsize=7)
+                _vlines(axs[1, 1])
+
+                axs[0, 2].plot(times[1:], dts_uniform)
+                axs[0, 2].axhline(dt_uniform, color='gray', ls='--',
+                                   alpha=0.5, label='uniform')
+                axs[0, 2].set(xlabel='Time [s]', ylabel=r'$\Delta t$',
+                              title='Timestep Distribution')
+                axs[0, 2].legend(fontsize=7)
+
+                axs[1, 2].plot(times, s_arr[:, 3])
+                axs[1, 2].set(xlabel='Time [s]',
+                              ylabel=r'$\dot{\theta}$ [rad/s]',
+                              title='Angular Velocity')
+                _vlines(axs[1, 2])
+
+                fig.suptitle(
+                    f"Uniform baseline (n={n_uniform}, "
+                    f"cost={prob.objective.value:.4f})", fontsize=13)
+                if results_dir:
+                    os.makedirs(results_dir, exist_ok=True)
+                    fig.savefig(os.path.join(results_dir,
+                                "trajectory_uniform_baseline.pdf"),
+                                bbox_inches='tight')
+                if not args.show:
+                    plt.close(fig)
+            else:
+                print(f"Uniform baseline: {prob.status}")
+        except Exception as exc:
+            print(f"Uniform baseline failed: {exc}")
+
         # Per-loss plots
         for loss_name, result in loss_results.items():
             print(f"Plotting {loss_name}...")
+            print(f"  OCP cost: {result['history'][-1]['loss_ocp']:.6f}")
             plot_loss_results(loss_name, result, results_dir,
                               show=args.show)
 
