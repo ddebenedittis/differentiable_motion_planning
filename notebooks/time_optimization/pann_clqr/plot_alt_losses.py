@@ -23,6 +23,7 @@ import numpy as np
 
 from utils import (
     LOSS_REGISTRY,
+    REPARAM_CHOICES,
     compute_trajectory_metrics,
     evaluate_continuous_cost,
     extract_trajectory_data,
@@ -53,12 +54,13 @@ n_u = 1
 # Load Results
 # ============================================================================ #
 
-def load_all_results(data_dir, loss_names=None):
+def load_all_results(data_dir, loss_names=None, suffix=""):
     """Load all available loss results from pickle files.
 
     Args:
         data_dir: directory containing pickle files
         loss_names: list of loss names to load, or None for all registered losses
+        suffix: pickle name suffix (e.g. "_logsoftmax" for logsoftmax results)
 
     Returns:
         results: dict of {loss_name: {"sol": ..., "history": ...}}
@@ -68,8 +70,8 @@ def load_all_results(data_dir, loss_names=None):
 
     for loss_name in candidates:
         try:
-            sol = load_pickle(data_dir, f"sol_{loss_name}")
-            history = load_pickle(data_dir, f"history_{loss_name}")
+            sol = load_pickle(data_dir, f"sol_{loss_name}{suffix}")
+            history = load_pickle(data_dir, f"history_{loss_name}{suffix}")
             results[loss_name] = {"sol": sol, "history": history}
         except (FileNotFoundError, OSError):
             pass
@@ -276,11 +278,11 @@ def save_summary(all_results, n, results_dir):
 # Timestep Evolution Videos
 # ============================================================================ #
 
-def _save_all_videos(all_results, data_dir, results_dir):
+def _save_all_videos(all_results, data_dir, results_dir, suffix=""):
     """Generate timestep evolution videos from saved dts distribution pickles."""
     for loss_name in all_results:
         try:
-            dts_dist = load_pickle(data_dir, f"dts_dist_{loss_name}")
+            dts_dist = load_pickle(data_dir, f"dts_dist_{loss_name}{suffix}")
         except (FileNotFoundError, OSError):
             print(f"  No dts distribution for {loss_name}, skipping video")
             continue
@@ -314,13 +316,17 @@ def main():
     parser.add_argument("--analysis-only", action="store_true", help="Only cross-loss analysis plots")
     parser.add_argument("--show", action="store_true", help="Display plots interactively")
     parser.add_argument("--save-video", action="store_true", help="Save timestep evolution videos")
+    parser.add_argument(
+        "--reparam", default="both",
+        choices=[*REPARAM_CHOICES, "both"],
+        help="Which reparametrization results to plot (default: both)",
+    )
 
     args = parser.parse_args()
 
     script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     data_dir = args.data_dir or os.path.join(script_dir, "data", "alt_losses")
-    results_dir = args.results_dir or os.path.join(script_dir, "results", "alt_losses")
-    os.makedirs(results_dir, exist_ok=True)
+    results_dir_base = args.results_dir or os.path.join(script_dir, "results", "alt_losses")
 
     # Try to use project matplotlib styling
     try:
@@ -330,44 +336,56 @@ def main():
     except ImportError:
         colors = ['#0072B2', '#E69F00', '#009E73', '#CC79A7', '#F0E442', '#D55E00']
 
-    print(f"Loading data from: {data_dir}")
-    all_results = load_all_results(data_dir, loss_names=args.loss)
+    reparams = list(REPARAM_CHOICES) if args.reparam == "both" else [args.reparam]
 
-    if not all_results:
-        print("No results found. Run alt_losses.py first to generate data.")
-        return
+    for reparam in reparams:
+        suffix = f"_{reparam}" if reparam != "softmax" else ""
+        results_dir = (os.path.join(results_dir_base, reparam)
+                       if reparam != "softmax" else results_dir_base)
+        os.makedirs(results_dir, exist_ok=True)
 
-    loaded = list(all_results.keys())
-    print(f"Loaded losses: {loaded}")
+        print(f"\n{'#' * 50}")
+        print(f"# Reparametrization: {reparam}")
+        print(f"{'#' * 50}")
+        print(f"Loading data from: {data_dir}")
+        all_results = load_all_results(data_dir, loss_names=args.loss,
+                                       suffix=suffix)
 
-    if not args.analysis_only:
-        # Per-loss plots
-        for loss_name, result in all_results.items():
-            print(f"Plotting {loss_name}...")
-            plot_loss_results(loss_name, result, args.n, results_dir, show=args.show)
+        if not all_results:
+            print(f"No {reparam} results found. Skipping.")
+            continue
 
-        # Continuous costs
-        print_continuous_costs(all_results, args.n)
+        loaded = list(all_results.keys())
+        print(f"Loaded losses: {loaded}")
 
-        # Comparison plot
-        plot_comparison(all_results, results_dir, show=args.show)
+        if not args.analysis_only:
+            # Per-loss plots
+            for loss_name, result in all_results.items():
+                print(f"Plotting {loss_name}...")
+                plot_loss_results(loss_name, result, args.n, results_dir, show=args.show)
 
-    # Cross-loss analysis
-    method_solutions = _build_method_solutions(all_results, args.n)
-    if method_solutions:
-        print(f"Analysis: {len(method_solutions)} losses")
-        plot_density_analysis(method_solutions, colors, results_dir, show=args.show)
-        plot_cross_correlation_analysis(method_solutions, colors, results_dir, show=args.show)
+            # Continuous costs
+            print_continuous_costs(all_results, args.n)
 
-    # Summary
-    save_summary(all_results, args.n, results_dir)
+            # Comparison plot
+            plot_comparison(all_results, results_dir, show=args.show)
 
-    # Timestep evolution videos
-    if args.save_video:
-        print("Saving timestep evolution videos...")
-        _save_all_videos(all_results, data_dir, results_dir)
+        # Cross-loss analysis
+        method_solutions = _build_method_solutions(all_results, args.n)
+        if method_solutions:
+            print(f"Analysis: {len(method_solutions)} losses")
+            plot_density_analysis(method_solutions, colors, results_dir, show=args.show)
+            plot_cross_correlation_analysis(method_solutions, colors, results_dir, show=args.show)
 
-    print(f"\nPlots saved to: {results_dir}")
+        # Summary
+        save_summary(all_results, args.n, results_dir)
+
+        # Timestep evolution videos
+        if args.save_video:
+            print("Saving timestep evolution videos...")
+            _save_all_videos(all_results, data_dir, results_dir, suffix=suffix)
+
+        print(f"\nPlots saved to: {results_dir}")
 
     if args.show:
         plt.show()

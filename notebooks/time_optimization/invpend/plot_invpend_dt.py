@@ -26,6 +26,7 @@ import numpy as np
 from invpend_clqr import create_invpend_baseline_clqr
 from utils import (
     LOSS_REGISTRY,
+    REPARAM_CHOICES,
     compute_trajectory_metrics,
     evaluate_continuous_cost,
     extract_trajectory_data,
@@ -89,8 +90,11 @@ METHOD_CONFIGS: list[MethodConfig] = [
 # Load Results
 # ============================================================================ #
 
-def load_method_results(data_dir):
+def load_method_results(data_dir, suffix=""):
     """Load all available method results from pickle files.
+
+    Args:
+        suffix: pickle name suffix (e.g. "_logsoftmax" for logsoftmax results)
 
     Returns:
         results: dict of {method_name: {sol, history, n, internal_methods}}
@@ -99,8 +103,8 @@ def load_method_results(data_dir):
 
     for cfg in METHOD_CONFIGS:
         try:
-            sol = load_pickle(data_dir, cfg.sol_pickle)
-            history = load_pickle(data_dir, cfg.history_pickle)
+            sol = load_pickle(data_dir, cfg.sol_pickle + suffix)
+            history = load_pickle(data_dir, cfg.history_pickle + suffix)
             n_inferred = len(np.array(history[-1]['dts']).flatten())
             results[cfg.key] = {
                 "sol": sol,
@@ -114,11 +118,12 @@ def load_method_results(data_dir):
     return results
 
 
-def load_loss_results(data_dir, loss_names=None):
+def load_loss_results(data_dir, loss_names=None, suffix=""):
     """Load all available loss results from pickle files.
 
     Args:
         loss_names: None (no losses), "all" (all available), or list of names.
+        suffix: pickle name suffix (e.g. "_logsoftmax" for logsoftmax results)
 
     Returns:
         results: dict of {loss_name: {"sol": ..., "history": ...}}
@@ -133,8 +138,8 @@ def load_loss_results(data_dir, loss_names=None):
 
     for loss_name in candidates:
         try:
-            sol = load_pickle(data_dir, f"sol_{loss_name}")
-            history = load_pickle(data_dir, f"history_{loss_name}")
+            sol = load_pickle(data_dir, f"sol_{loss_name}{suffix}")
+            history = load_pickle(data_dir, f"history_{loss_name}{suffix}")
             n_inferred = len(np.array(history[-1]['dts']).flatten())
             results[loss_name] = {"sol": sol, "history": history, "n": n_inferred}
         except (FileNotFoundError, OSError):
@@ -636,14 +641,18 @@ def main():
                         help="Display plots interactively")
     parser.add_argument("--baseline", action="store_true",
                         help="Include baseline sweep plot")
+    parser.add_argument(
+        "--reparam", default="both",
+        choices=[*REPARAM_CHOICES, "both"],
+        help="Which reparametrization results to plot (default: both)",
+    )
 
     args = parser.parse_args()
 
     script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     data_dir = args.data_dir or os.path.join(script_dir, "data", "invpend_dt")
-    results_dir = (args.results_dir
-                   or os.path.join(script_dir, "results", "invpend_dt"))
-    os.makedirs(results_dir, exist_ok=True)
+    results_dir_base = (args.results_dir
+                        or os.path.join(script_dir, "results", "invpend_dt"))
 
     try:
         from dimp.utils import init_matplotlib, get_colors
@@ -653,184 +662,196 @@ def main():
         colors = ['#0072B2', '#E69F00', '#009E73', '#CC79A7', '#F0E442',
                   '#D55E00']
 
-    print(f"Loading data from: {data_dir}")
-    method_results = load_method_results(data_dir)
-    loss_results = load_loss_results(data_dir, loss_names=args.loss)
+    reparams = list(REPARAM_CHOICES) if args.reparam == "both" else [args.reparam]
 
-    # Filter methods if requested
-    if args.method:
-        method_results = {k: v for k, v in method_results.items()
-                          if k in args.method}
+    for reparam in reparams:
+        suffix = f"_{reparam}" if reparam != "softmax" else ""
+        results_dir = (os.path.join(results_dir_base, reparam)
+                       if reparam != "softmax" else results_dir_base)
+        os.makedirs(results_dir, exist_ok=True)
 
-    if not method_results and not loss_results:
-        print("No results found. Run invpend_dt.py first to generate data.")
-        return
+        print(f"\n{'#' * 50}")
+        print(f"# Reparametrization: {reparam}")
+        print(f"{'#' * 50}")
+        print(f"Loading data from: {data_dir}")
+        method_results = load_method_results(data_dir, suffix=suffix)
+        loss_results = load_loss_results(data_dir, loss_names=args.loss,
+                                         suffix=suffix)
 
-    loaded_methods = list(method_results.keys())
-    loaded_losses = list(loss_results.keys())
-    print(f"Loaded methods: {loaded_methods}")
-    print(f"Loaded losses: {loaded_losses}")
+        # Filter methods if requested
+        if args.method:
+            method_results = {k: v for k, v in method_results.items()
+                              if k in args.method}
 
-    if not args.analysis_only:
-        # Per-method plots
-        for name, result in method_results.items():
-            print(f"Plotting {name}...")
-            plot_method_results(name, result, results_dir,
-                                show=args.show)
+        if not method_results and not loss_results:
+            print(f"No {reparam} results found. Skipping.")
+            continue
 
-            # Inverted-pendulum-specific trajectory plot
-            for method in result["internal_methods"]:
-                sol = result["sol"][method]
-                hist_m = [h for h in result["history"]
-                          if h['method'] == method]
-                if hist_m:
-                    dts_final = np.array(hist_m[-1]['dts']).flatten()
-                    plot_invpend_trajectory(
-                        sol, dts_final, result["n"],
-                        title=f"{name}: {method}",
-                        results_dir=results_dir,
-                        filename=f"trajectory_{name}_{method}",
-                        show=args.show,
-                    )
+        loaded_methods = list(method_results.keys())
+        loaded_losses = list(loss_results.keys())
+        print(f"Loaded methods: {loaded_methods}")
+        print(f"Loaded losses: {loaded_losses}")
 
-        # Uniform-timestep baseline
-        if method_results:
-            n_uniform = next(iter(method_results.values()))["n"]
-        elif loss_results:
-            n_uniform = next(iter(loss_results.values()))["n"]
-        else:
-            n_uniform = 80
-        dt_uniform = T / n_uniform
-        try:
-            prob, s_base, u_base = create_invpend_baseline_clqr(
-                n_uniform, s0, A, B, Q, R, dt_uniform, u_max, x_max, s_goal,
-            )
-            prob.solve()
-            if prob.status in ("optimal", "optimal_inaccurate"):
-                print(f"--- Uniform: OCP cost ---")
-                print(f"  n={n_uniform}, cost={prob.objective.value:.6f}")
-                # Build arrays for trajectory plot
-                dts_uniform = np.full(n_uniform, dt_uniform)
-                e_arr = np.array([s_base[i + 1].value.flatten()
-                                  for i in range(n_uniform)])
-                s_arr = np.vstack([s0, e_arr + s_goal])
-                u_arr = np.array([u_base[i].value.flatten()
-                                  for i in range(n_uniform)])
-                u_arr_plot = np.vstack([u_arr[:1], u_arr])
-                times = np.concatenate([[0.0], np.cumsum(dts_uniform)])
+        if not args.analysis_only:
+            # Per-method plots
+            for name, result in method_results.items():
+                print(f"Plotting {name}...")
+                plot_method_results(name, result, results_dir,
+                                    show=args.show)
 
-                fig, axs = plt.subplots(2, 3, figsize=(12.8, 6.4),
-                                        constrained_layout=True)
+                # Inverted-pendulum-specific trajectory plot
+                for method in result["internal_methods"]:
+                    sol = result["sol"][method]
+                    hist_m = [h for h in result["history"]
+                              if h['method'] == method]
+                    if hist_m:
+                        dts_final = np.array(hist_m[-1]['dts']).flatten()
+                        plot_invpend_trajectory(
+                            sol, dts_final, result["n"],
+                            title=f"{name}: {method}",
+                            results_dir=results_dir,
+                            filename=f"trajectory_{name}_{method}",
+                            show=args.show,
+                        )
 
-                def _vlines(ax):
-                    for t_val in times:
-                        ax.axvline(t_val, color='gray', linestyle='-',
-                                   alpha=0.08, linewidth=0.5)
-
-                axs[0, 0].plot(times, s_arr[:, 0])
-                axs[0, 0].axhline(s_goal[0], color='gray', ls='--', alpha=0.5,
-                                   label=f'goal={s_goal[0]}')
-                axs[0, 0].set(xlabel='Time [s]', ylabel='x [m]',
-                              title='Position')
-                axs[0, 0].legend(fontsize=7)
-                _vlines(axs[0, 0])
-
-                axs[0, 1].plot(times, s_arr[:, 2])
-                axs[0, 1].axhline(theta_max, color='r', ls='--', alpha=0.5,
-                                   label=r'$\pm\theta_{\max}$')
-                axs[0, 1].axhline(-theta_max, color='r', ls='--', alpha=0.5)
-                axs[0, 1].set(xlabel='Time [s]', ylabel=r'$\theta$ [rad]',
-                              title='Angle')
-                axs[0, 1].legend(fontsize=7)
-                _vlines(axs[0, 1])
-
-                axs[1, 0].plot(times, s_arr[:, 1])
-                axs[1, 0].axhline(v_max, color='r', ls='--', alpha=0.5,
-                                   label=r'$\pm v_{\max}$')
-                axs[1, 0].axhline(-v_max, color='r', ls='--', alpha=0.5)
-                axs[1, 0].set(xlabel='Time [s]', ylabel=r'$\dot{x}$ [m/s]',
-                              title='Velocity')
-                axs[1, 0].legend(fontsize=7)
-                _vlines(axs[1, 0])
-
-                axs[1, 1].plot(times, u_arr_plot.flatten())
-                axs[1, 1].axhline(u_max, color='r', ls='--', alpha=0.5,
-                                   label=r'$\pm F_{\max}$')
-                axs[1, 1].axhline(-u_max, color='r', ls='--', alpha=0.5)
-                axs[1, 1].set(xlabel='Time [s]', ylabel='F [N]',
-                              title='Force')
-                axs[1, 1].legend(fontsize=7)
-                _vlines(axs[1, 1])
-
-                axs[0, 2].plot(times[1:], dts_uniform)
-                axs[0, 2].axhline(dt_uniform, color='gray', ls='--',
-                                   alpha=0.5, label='uniform')
-                axs[0, 2].set(xlabel='Time [s]', ylabel=r'$\Delta t$',
-                              title='Timestep Distribution')
-                axs[0, 2].legend(fontsize=7)
-
-                axs[1, 2].plot(times, s_arr[:, 3])
-                axs[1, 2].set(xlabel='Time [s]',
-                              ylabel=r'$\dot{\theta}$ [rad/s]',
-                              title='Angular Velocity')
-                _vlines(axs[1, 2])
-
-                fig.suptitle(
-                    f"Uniform baseline (n={n_uniform}, "
-                    f"cost={prob.objective.value:.4f})", fontsize=13)
-                if results_dir:
-                    os.makedirs(results_dir, exist_ok=True)
-                    fig.savefig(os.path.join(results_dir,
-                                "trajectory_uniform_baseline.pdf"),
-                                bbox_inches='tight')
-                if not args.show:
-                    plt.close(fig)
+            # Uniform-timestep baseline
+            if method_results:
+                n_uniform = next(iter(method_results.values()))["n"]
+            elif loss_results:
+                n_uniform = next(iter(loss_results.values()))["n"]
             else:
-                print(f"Uniform baseline: {prob.status}")
-        except Exception as exc:
-            print(f"Uniform baseline failed: {exc}")
+                n_uniform = 80
+            dt_uniform = T / n_uniform
+            try:
+                prob, s_base, u_base = create_invpend_baseline_clqr(
+                    n_uniform, s0, A, B, Q, R, dt_uniform, u_max, x_max, s_goal,
+                )
+                prob.solve()
+                if prob.status in ("optimal", "optimal_inaccurate"):
+                    print(f"--- Uniform: OCP cost ---")
+                    print(f"  n={n_uniform}, cost={prob.objective.value:.6f}")
+                    # Build arrays for trajectory plot
+                    dts_uniform = np.full(n_uniform, dt_uniform)
+                    e_arr = np.array([s_base[i + 1].value.flatten()
+                                      for i in range(n_uniform)])
+                    s_arr = np.vstack([s0, e_arr + s_goal])
+                    u_arr = np.array([u_base[i].value.flatten()
+                                      for i in range(n_uniform)])
+                    u_arr_plot = np.vstack([u_arr[:1], u_arr])
+                    times = np.concatenate([[0.0], np.cumsum(dts_uniform)])
 
-        # Per-loss plots
-        for loss_name, result in loss_results.items():
-            print(f"Plotting {loss_name}...")
-            print(f"  OCP cost: {result['history'][-1]['loss_ocp']:.6f}")
-            plot_loss_results(loss_name, result, results_dir,
-                              show=args.show)
+                    fig, axs = plt.subplots(2, 3, figsize=(12.8, 6.4),
+                                            constrained_layout=True)
 
-            # Inverted-pendulum trajectory for each loss
-            dts_final = np.array(result["history"][-1]['dts']).flatten()
-            plot_invpend_trajectory(
-                result["sol"], dts_final, result["n"],
-                title=loss_name,
-                results_dir=results_dir,
-                filename=f"trajectory_{loss_name}",
-                show=args.show,
-            )
+                    def _vlines(ax):
+                        for t_val in times:
+                            ax.axvline(t_val, color='gray', linestyle='-',
+                                       alpha=0.08, linewidth=0.5)
 
-        # Continuous costs
-        print_continuous_costs(method_results, loss_results)
+                    axs[0, 0].plot(times, s_arr[:, 0])
+                    axs[0, 0].axhline(s_goal[0], color='gray', ls='--', alpha=0.5,
+                                       label=f'goal={s_goal[0]}')
+                    axs[0, 0].set(xlabel='Time [s]', ylabel='x [m]',
+                                  title='Position')
+                    axs[0, 0].legend(fontsize=7)
+                    _vlines(axs[0, 0])
 
-        # Loss comparison
-        plot_loss_comparison(loss_results, results_dir, show=args.show)
+                    axs[0, 1].plot(times, s_arr[:, 2])
+                    axs[0, 1].axhline(theta_max, color='r', ls='--', alpha=0.5,
+                                       label=r'$\pm\theta_{\max}$')
+                    axs[0, 1].axhline(-theta_max, color='r', ls='--', alpha=0.5)
+                    axs[0, 1].set(xlabel='Time [s]', ylabel=r'$\theta$ [rad]',
+                                  title='Angle')
+                    axs[0, 1].legend(fontsize=7)
+                    _vlines(axs[0, 1])
 
-        # Baseline sweep
-        if args.baseline:
-            print("Running baseline sweep...")
-            plot_baseline_sweep(results_dir, show=args.show)
+                    axs[1, 0].plot(times, s_arr[:, 1])
+                    axs[1, 0].axhline(v_max, color='r', ls='--', alpha=0.5,
+                                       label=r'$\pm v_{\max}$')
+                    axs[1, 0].axhline(-v_max, color='r', ls='--', alpha=0.5)
+                    axs[1, 0].set(xlabel='Time [s]', ylabel=r'$\dot{x}$ [m/s]',
+                                  title='Velocity')
+                    axs[1, 0].legend(fontsize=7)
+                    _vlines(axs[1, 0])
 
-    # Cross-method/loss analysis
-    method_solutions = _build_method_solutions(method_results, loss_results)
-    if method_solutions:
-        print(f"Analysis: {len(method_solutions)} variants")
-        plot_density_analysis(method_solutions, colors, results_dir,
-                              show=args.show)
-        plot_cross_correlation_analysis(method_solutions, colors, results_dir,
-                                        show=args.show)
+                    axs[1, 1].plot(times, u_arr_plot.flatten())
+                    axs[1, 1].axhline(u_max, color='r', ls='--', alpha=0.5,
+                                       label=r'$\pm F_{\max}$')
+                    axs[1, 1].axhline(-u_max, color='r', ls='--', alpha=0.5)
+                    axs[1, 1].set(xlabel='Time [s]', ylabel='F [N]',
+                                  title='Force')
+                    axs[1, 1].legend(fontsize=7)
+                    _vlines(axs[1, 1])
 
-    # Summary
-    save_summary(method_results, loss_results, results_dir)
+                    axs[0, 2].plot(times[1:], dts_uniform)
+                    axs[0, 2].axhline(dt_uniform, color='gray', ls='--',
+                                       alpha=0.5, label='uniform')
+                    axs[0, 2].set(xlabel='Time [s]', ylabel=r'$\Delta t$',
+                                  title='Timestep Distribution')
+                    axs[0, 2].legend(fontsize=7)
 
-    print(f"\nPlots saved to: {results_dir}")
+                    axs[1, 2].plot(times, s_arr[:, 3])
+                    axs[1, 2].set(xlabel='Time [s]',
+                                  ylabel=r'$\dot{\theta}$ [rad/s]',
+                                  title='Angular Velocity')
+                    _vlines(axs[1, 2])
+
+                    fig.suptitle(
+                        f"Uniform baseline (n={n_uniform}, "
+                        f"cost={prob.objective.value:.4f})", fontsize=13)
+                    if results_dir:
+                        os.makedirs(results_dir, exist_ok=True)
+                        fig.savefig(os.path.join(results_dir,
+                                    "trajectory_uniform_baseline.pdf"),
+                                    bbox_inches='tight')
+                    if not args.show:
+                        plt.close(fig)
+                else:
+                    print(f"Uniform baseline: {prob.status}")
+            except Exception as exc:
+                print(f"Uniform baseline failed: {exc}")
+
+            # Per-loss plots
+            for loss_name, result in loss_results.items():
+                print(f"Plotting {loss_name}...")
+                print(f"  OCP cost: {result['history'][-1]['loss_ocp']:.6f}")
+                plot_loss_results(loss_name, result, results_dir,
+                                  show=args.show)
+
+                # Inverted-pendulum trajectory for each loss
+                dts_final = np.array(result["history"][-1]['dts']).flatten()
+                plot_invpend_trajectory(
+                    result["sol"], dts_final, result["n"],
+                    title=loss_name,
+                    results_dir=results_dir,
+                    filename=f"trajectory_{loss_name}",
+                    show=args.show,
+                )
+
+            # Continuous costs
+            print_continuous_costs(method_results, loss_results)
+
+            # Loss comparison
+            plot_loss_comparison(loss_results, results_dir, show=args.show)
+
+            # Baseline sweep
+            if args.baseline:
+                print("Running baseline sweep...")
+                plot_baseline_sweep(results_dir, show=args.show)
+
+        # Cross-method/loss analysis
+        method_solutions = _build_method_solutions(method_results, loss_results)
+        if method_solutions:
+            print(f"Analysis: {len(method_solutions)} variants")
+            plot_density_analysis(method_solutions, colors, results_dir,
+                                  show=args.show)
+            plot_cross_correlation_analysis(method_solutions, colors, results_dir,
+                                            show=args.show)
+
+        # Summary
+        save_summary(method_results, loss_results, results_dir)
+
+        print(f"\nPlots saved to: {results_dir}")
 
     if args.show:
         plt.show()

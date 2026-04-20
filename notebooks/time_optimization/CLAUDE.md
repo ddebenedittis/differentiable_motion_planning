@@ -43,6 +43,11 @@ Files are organized into example-specific subfolders. `utils.py`, `data/`, and `
 - **`invpend_dt.py`** — Data generation: trains methods/losses, saves to `data/invpend_dt/`
 - **`plot_invpend_dt.py`** / **`plot_invpend_dt.ipynb`** — Visualization: loads pickles, produces plots in `results/invpend_dt/`
 
+### `stiff_sys/` — Stiff system LTI example
+- **`stiff_sys_clqr.py`** — QP builders for diagonal system with time constants 0.1s, 10s, 100s
+- **`stiff_sys_dt.py`** — Data generation: trains methods/losses, saves to `data/stiff_sys_dt/`
+- **`plot_stiff_sys_dt.py`** — Visualization: loads pickles, produces plots in `results/stiff_sys_dt/`
+
 ### Shared (top level)
 - **`utils.py`** — Shared utilities (discretization, loss functions, plotting, I/O)
 - **`data/`** — Pickle files with saved results (subdirs per example)
@@ -87,4 +92,26 @@ python invpend/invpend_dt.py --mode full --experiment methods --method rep
 
 # Generate all plots
 python invpend/plot_invpend_dt.py
+
+# --- stiff_sys example ---
+# Train all experiments (test)
+python stiff_sys/stiff_sys_dt.py --mode test --experiment all
+
+# Train specific method (full run)
+python stiff_sys/stiff_sys_dt.py --mode full --experiment methods --method rep
+
+# Train specific losses (full run)
+python stiff_sys/stiff_sys_dt.py --mode full --experiment losses --loss L_IV L_FI
+
+# Generate all plots
+python stiff_sys/plot_stiff_sys_dt.py
+
+# Plot specific methods/losses
+python stiff_sys/plot_stiff_sys_dt.py --method rep --loss L_IV L_FI
+
+# Only cross-method analysis plots
+python stiff_sys/plot_stiff_sys_dt.py --analysis-only
+
+# Include baseline sweep
+python stiff_sys/plot_stiff_sys_dt.py --baseline
 ```

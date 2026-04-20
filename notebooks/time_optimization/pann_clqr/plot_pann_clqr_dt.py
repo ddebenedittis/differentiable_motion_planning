@@ -24,6 +24,7 @@ import numpy as np
 
 from pann_clqr import create_pann_clqr
 from utils import (
+    REPARAM_CHOICES,
     pickle_name,
     load_pickle,
     evaluate_continuous_cost,
@@ -79,8 +80,11 @@ n_u = 1
 # Load Results
 # ============================================================================ #
 
-def load_all_results(data_dir, n=160, n_zoh=80):
+def load_all_results(data_dir, n=160, n_zoh=80, suffix=""):
     """Load all available method results from pickle files.
+
+    Args:
+        suffix: pickle name suffix (e.g. "_logsoftmax" for logsoftmax results)
 
     Returns:
         results: dict of {method_name: {sol, history, sol_method, n, internal_methods}}
@@ -90,12 +94,12 @@ def load_all_results(data_dir, n=160, n_zoh=80):
     for cfg in METHOD_CONFIGS:
         try:
             if cfg.uses_custom_n:
-                sol_pkl = pickle_name(cfg.sol_pickle, n_zoh, n)
-                hist_pkl = pickle_name(cfg.history_pickle, n_zoh, n)
+                sol_pkl = pickle_name(cfg.sol_pickle + suffix, n_zoh, n)
+                hist_pkl = pickle_name(cfg.history_pickle + suffix, n_zoh, n)
                 n_method = n_zoh
             else:
-                sol_pkl = cfg.sol_pickle
-                hist_pkl = cfg.history_pickle
+                sol_pkl = cfg.sol_pickle + suffix
+                hist_pkl = cfg.history_pickle + suffix
                 n_method = n
 
             sol = load_pickle(data_dir, sol_pkl)
@@ -388,19 +392,20 @@ _VIDEO_CONFIG = {
 }
 
 
-def _save_all_videos(all_results, data_dir, results_dir, n, n_zoh):
+def _save_all_videos(all_results, data_dir, results_dir, n, n_zoh, suffix=""):
     """Generate timestep evolution videos from saved dts distribution pickles."""
     for name, result in all_results.items():
         for method in result["internal_methods"]:
             # Look up config, with special handling for zoh
             if name == "zoh":
-                dist_pkl = pickle_name("dts_dist_zoh", n_zoh, n)
+                dist_pkl = pickle_name("dts_dist_zoh" + suffix, n_zoh, n)
                 video_name = f"zoh_timesteps_n{n_zoh}" if n_zoh != n else "zoh_timesteps"
             else:
                 key = (name, method)
                 if key not in _VIDEO_CONFIG:
                     continue
                 dist_pkl, video_name = _VIDEO_CONFIG[key]
+                dist_pkl = dist_pkl + suffix
 
             try:
                 dts_all = load_pickle(data_dir, dist_pkl)
@@ -439,13 +444,17 @@ def main():
     parser.add_argument("--show", action="store_true", help="Display plots interactively")
     parser.add_argument("--baseline", action="store_true", help="Include baseline sweep plot")
     parser.add_argument("--save-video", action="store_true", help="Save timestep evolution videos")
+    parser.add_argument(
+        "--reparam", default="both",
+        choices=[*REPARAM_CHOICES, "both"],
+        help="Which reparametrization results to plot (default: both)",
+    )
 
     args = parser.parse_args()
 
     script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     data_dir = args.data_dir or os.path.join(script_dir, "data", "pann_clqr_dt")
-    results_dir = args.results_dir or os.path.join(script_dir, "results", "pann_clqr_dt")
-    os.makedirs(results_dir, exist_ok=True)
+    results_dir_base = args.results_dir or os.path.join(script_dir, "results", "pann_clqr_dt")
 
     # Try to use project matplotlib styling
     try:
@@ -455,52 +464,65 @@ def main():
     except ImportError:
         colors = ['#0072B2', '#E69F00', '#009E73', '#CC79A7', '#F0E442', '#D55E00']
 
-    print(f"Loading data from: {data_dir}")
-    all_results = load_all_results(data_dir, n=args.n, n_zoh=args.n_zoh)
+    reparams = list(REPARAM_CHOICES) if args.reparam == "both" else [args.reparam]
 
-    if not all_results:
-        print("No results found. Run pann_clqr_dt.py first to generate data.")
-        return
+    for reparam in reparams:
+        suffix = f"_{reparam}" if reparam != "softmax" else ""
+        results_dir = (os.path.join(results_dir_base, reparam)
+                       if reparam != "softmax" else results_dir_base)
+        os.makedirs(results_dir, exist_ok=True)
 
-    # Filter methods if requested
-    if args.method:
-        all_results = {k: v for k, v in all_results.items() if k in args.method}
+        print(f"\n{'#' * 50}")
+        print(f"# Reparametrization: {reparam}")
+        print(f"{'#' * 50}")
+        print(f"Loading data from: {data_dir}")
+        all_results = load_all_results(data_dir, n=args.n, n_zoh=args.n_zoh,
+                                       suffix=suffix)
 
-    loaded = list(all_results.keys())
-    print(f"Loaded methods: {loaded}")
+        if not all_results:
+            print(f"No {reparam} results found. Skipping.")
+            continue
 
-    if not args.analysis_only:
-        # Per-method plots
-        for name, result in all_results.items():
-            print(f"Plotting {name}...")
-            plot_method_results(name, result, results_dir, show=args.show)
+        # Filter methods if requested
+        if args.method:
+            all_results = {k: v for k, v in all_results.items() if k in args.method}
 
-        # HS comparison
-        if "hs" in all_results:
-            print("Plotting HS comparison...")
-            plot_hs_comparison(all_results["hs"], args.n, results_dir, show=args.show)
+        loaded = list(all_results.keys())
+        print(f"Loaded methods: {loaded}")
 
-        # Continuous costs
-        print_continuous_costs(all_results, args.n)
+        if not args.analysis_only:
+            # Per-method plots
+            for name, result in all_results.items():
+                print(f"Plotting {name}...")
+                plot_method_results(name, result, results_dir, show=args.show)
 
-        # Baseline sweep
-        if args.baseline:
-            print("Running baseline sweep...")
-            plot_baseline_sweep(results_dir, show=args.show)
+            # HS comparison
+            if "hs" in all_results:
+                print("Plotting HS comparison...")
+                plot_hs_comparison(all_results["hs"], args.n, results_dir, show=args.show)
 
-    # Cross-method analysis
-    method_solutions = _build_method_solutions(all_results, args.n)
-    if method_solutions:
-        print(f"Analysis: {len(method_solutions)} method variants")
-        plot_density_analysis(method_solutions, colors, results_dir, show=args.show)
-        plot_cross_correlation_analysis(method_solutions, colors, results_dir, show=args.show)
+            # Continuous costs
+            print_continuous_costs(all_results, args.n)
 
-    # Timestep evolution videos
-    if args.save_video:
-        print("Saving timestep evolution videos...")
-        _save_all_videos(all_results, data_dir, results_dir, args.n, args.n_zoh)
+            # Baseline sweep
+            if args.baseline:
+                print("Running baseline sweep...")
+                plot_baseline_sweep(results_dir, show=args.show)
 
-    print(f"\nPlots saved to: {results_dir}")
+        # Cross-method analysis
+        method_solutions = _build_method_solutions(all_results, args.n)
+        if method_solutions:
+            print(f"Analysis: {len(method_solutions)} method variants")
+            plot_density_analysis(method_solutions, colors, results_dir, show=args.show)
+            plot_cross_correlation_analysis(method_solutions, colors, results_dir, show=args.show)
+
+        # Timestep evolution videos
+        if args.save_video:
+            print("Saving timestep evolution videos...")
+            _save_all_videos(all_results, data_dir, results_dir, args.n, args.n_zoh,
+                             suffix=suffix)
+
+        print(f"\nPlots saved to: {results_dir}")
 
     if args.show:
         plt.show()

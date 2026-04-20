@@ -25,12 +25,13 @@ from tqdm import tqdm
 from pann_clqr import create_exact_zoh_cost_clqr
 from utils import (
     LOSS_REGISTRY,
+    REPARAM_CHOICES,
     AdaptiveGradientBalancer,
     RunMode,
     get_n_epochs,
+    get_reparam_fn,
     save_dts_distribution,
     save_pickle,
-    theta_2_dt,
     zoh_cost_matrices,
 )
 
@@ -115,13 +116,16 @@ def build_loss_kwargs(loss_name, states, inputs, dts, W_list, Ad_list, Bd_list,
 # Training
 # ============================================================================ #
 
-def train_one_loss(loss_name, n, n_epochs, lr, lambda0, use_balancing, data_dir, disc="foe"):
+def train_one_loss(loss_name, n, n_epochs, lr, lambda0, use_balancing, data_dir,
+                   disc="foe", reparam="softmax"):
     """ZOH3 training loop with one alternative loss as regularizer.
 
     Returns:
         sol: list of torch tensors (QP solution)
         history: list of dicts with training metrics
     """
+    theta_2_dt = get_reparam_fn(reparam)
+
     # Use float64 to match cvxpylayers output dtype
     dtype = torch.float64
     A_t = torch.tensor(A, dtype=dtype)
@@ -132,6 +136,7 @@ def train_one_loss(loss_name, n, n_epochs, lr, lambda0, use_balancing, data_dir,
 
     theta = torch.nn.Parameter(torch.ones(n, 1, dtype=dtype))
     optim = torch.optim.Adam([theta], lr=lr)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optim, T_max=n_epochs, eta_min=lr * 0.01)
 
     _, layer, _, _, _, _, _, _ = create_exact_zoh_cost_clqr(n, s0, n_s, n_u, u_max)
 
@@ -190,7 +195,9 @@ def train_one_loss(loss_name, n, n_epochs, lr, lambda0, use_balancing, data_dir,
 
             loss = loss_ocp + lambda_hat * loss_reg
             loss.backward()
+            torch.nn.utils.clip_grad_norm_([theta], max_norm=1.0)
             optim.step()
+            scheduler.step()
 
             history.append({
                 "epoch": epoch,
@@ -209,9 +216,10 @@ def train_one_loss(loss_name, n, n_epochs, lr, lambda0, use_balancing, data_dir,
             )
 
     # Save results
-    save_pickle(data_dir, f"sol_{loss_name}", sol)
-    save_pickle(data_dir, f"history_{loss_name}", history)
-    save_dts_distribution(data_dir, f"dts_dist_{loss_name}", history)
+    suffix = f"_{reparam}" if reparam != "softmax" else ""
+    save_pickle(data_dir, f"sol_{loss_name}{suffix}", sol)
+    save_pickle(data_dir, f"history_{loss_name}{suffix}", history)
+    save_dts_distribution(data_dir, f"dts_dist_{loss_name}{suffix}", history)
 
     print(f"  Final loss: {history[-1]['loss']:.6f}")
     return sol, history
@@ -247,6 +255,11 @@ def main():
         "--data-dir", default=None,
         help="Pickle output directory (default: data/alt_losses)",
     )
+    parser.add_argument(
+        "--reparam", default="both",
+        choices=[*REPARAM_CHOICES, "both"],
+        help="Reparametrization: softmax, logsoftmax, or both (default: both)",
+    )
 
     args = parser.parse_args()
 
@@ -261,25 +274,30 @@ def main():
     data_dir = args.data_dir or os.path.join(script_dir, "data", "alt_losses")
     os.makedirs(data_dir, exist_ok=True)
 
+    reparams = list(REPARAM_CHOICES) if args.reparam == "both" else [args.reparam]
+
     save_run_config(data_dir, args)
 
     print(f"Output directory: {data_dir}")
     print(f"Losses: {loss_names}")
+    print(f"Reparametrizations: {reparams}")
     print(f"Mode: {args.mode}, n={args.n}, lr={args.lr}, disc={args.disc}")
     print(f"Balancing: {'adaptive' if not args.no_balancing else 'fixed'}, lambda0={args.lambda0}")
     print()
 
-    for loss_name in loss_names:
-        n_epochs = args.epochs or get_n_epochs(run_mode, loss_name)
+    for reparam in reparams:
+        for loss_name in loss_names:
+            n_epochs = args.epochs or get_n_epochs(run_mode, loss_name)
 
-        print(f"\n{'=' * 40}")
-        print(f"Training {loss_name} ({n_epochs} epochs)")
-        print(f"{'=' * 40}")
+            print(f"\n{'=' * 40}")
+            print(f"Training {loss_name} [{reparam}] ({n_epochs} epochs)")
+            print(f"{'=' * 40}")
 
-        train_one_loss(
-            loss_name, args.n, n_epochs, args.lr, args.lambda0,
-            not args.no_balancing, data_dir, disc=args.disc,
-        )
+            train_one_loss(
+                loss_name, args.n, n_epochs, args.lr, args.lambda0,
+                not args.no_balancing, data_dir, disc=args.disc,
+                reparam=reparam,
+            )
 
     print(f"\nResults saved to: {data_dir}")
 

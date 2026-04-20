@@ -29,7 +29,8 @@ from utils import (
     RunMode,
     get_n_epochs,
     pickle_name,
-    theta_2_dt,
+    get_reparam_fn,
+    REPARAM_CHOICES,
     Ad_Bd_from_dt,
     zoh_cost_matrices,
     task_loss,
@@ -260,7 +261,8 @@ _INTERNAL_METHOD_KEY = {
 }
 
 
-def train_softmax_method(method_name, n, n_epochs, lr, data_dir, n_default=160):
+def train_softmax_method(method_name, n, n_epochs, lr, data_dir, n_default=160,
+                         reparam="softmax"):
     """Train a softmax-based method.
 
     Args:
@@ -270,12 +272,14 @@ def train_softmax_method(method_name, n, n_epochs, lr, data_dir, n_default=160):
         lr: learning rate
         data_dir: directory for pickle output
         n_default: default n for pickle naming (used by zoh)
+        reparam: reparametrization ("softmax" or "logsoftmax")
 
     Returns:
         sol: solution dict or tensors
         history: list of history dicts
     """
     internal_key = _INTERNAL_METHOD_KEY[method_name]
+    theta_2_dt = get_reparam_fn(reparam)
 
     # Use float32 for most methods, consistent with notebook
     dtype = torch.float32
@@ -322,6 +326,12 @@ def train_softmax_method(method_name, n, n_epochs, lr, data_dir, n_default=160):
 
     # Determine if this method shares pickles with another (hs_uniform/hs_substeps)
     sol_name, hist_name, dist_name = _pickle_names(method_name, n, n_default)
+
+    # Add suffix for non-default reparametrization
+    if reparam != "softmax":
+        sol_name += f"_{reparam}"
+        hist_name += f"_{reparam}"
+        dist_name += f"_{reparam}"
 
     # For hs methods, we need to handle shared pickle files
     if method_name in ("hs_uniform", "hs_substeps"):
@@ -371,6 +381,11 @@ def main():
         "--data-dir", default=None,
         help="Pickle output directory (default: data/pann_clqr_dt)",
     )
+    parser.add_argument(
+        "--reparam", default="both",
+        choices=[*REPARAM_CHOICES, "both"],
+        help="Reparametrization: softmax, logsoftmax, or both (default: both)",
+    )
     args = parser.parse_args()
 
     methods = ALL_METHODS if "all" in args.method else args.method
@@ -387,32 +402,36 @@ def main():
     # Default n for pickle naming (matches notebook default)
     n_default = 160
 
+    reparams = list(REPARAM_CHOICES) if args.reparam == "both" else [args.reparam]
+
     print(f"Output directory: {data_dir}")
     print(f"Methods: {methods}")
+    print(f"Reparametrizations: {reparams}")
     print(f"Mode: {args.mode}")
     print()
 
-    for method_name in methods:
-        n = args.n or DEFAULT_N[method_name]
-        lr = args.lr or DEFAULT_LR[method_name]
-        method_key = "aux" if method_name == "aux" else method_name
-        # Map hs methods to the "hs" key for epoch lookup
-        epoch_key = method_name
-        if method_name in ("hs_uniform", "hs_substeps"):
-            epoch_key = "hs"
-        n_epochs = args.epochs or get_n_epochs(run_mode, epoch_key)
+    for reparam in reparams:
+        for method_name in methods:
+            n = args.n or DEFAULT_N[method_name]
+            lr = args.lr or DEFAULT_LR[method_name]
+            method_key = "aux" if method_name == "aux" else method_name
+            # Map hs methods to the "hs" key for epoch lookup
+            epoch_key = method_name
+            if method_name in ("hs_uniform", "hs_substeps"):
+                epoch_key = "hs"
+            n_epochs = args.epochs or get_n_epochs(run_mode, epoch_key)
 
-        print(f"\n{'=' * 40}")
-        print(f"Training {method_name} (n={n}, epochs={n_epochs}, lr={lr})")
-        print(f"{'=' * 40}")
+            print(f"\n{'=' * 40}")
+            print(f"Training {method_name} [{reparam}] (n={n}, epochs={n_epochs}, lr={lr})")
+            print(f"{'=' * 40}")
 
-        if method_name == "aux":
-            train_aux(n, n_epochs, lr, data_dir)
-        else:
-            train_softmax_method(
-                method_name, n, n_epochs, lr, data_dir,
-                n_default=n_default,
-            )
+            if method_name == "aux":
+                train_aux(n, n_epochs, lr, data_dir)
+            else:
+                train_softmax_method(
+                    method_name, n, n_epochs, lr, data_dir,
+                    n_default=n_default, reparam=reparam,
+                )
 
     print(f"\nResults saved to: {data_dir}")
 

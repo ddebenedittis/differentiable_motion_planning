@@ -33,13 +33,14 @@ from invpend_clqr import (
 )
 from utils import (
     LOSS_REGISTRY,
+    REPARAM_CHOICES,
     AdaptiveGradientBalancer,
     RunMode,
     get_n_epochs,
+    get_reparam_fn,
     save_dts_distribution,
     save_pickle,
     task_loss,
-    theta_2_dt,
     zoh_cost_matrices,
 )
 
@@ -220,7 +221,8 @@ _INTERNAL_METHOD_KEY = {
 }
 
 
-def train_softmax_method(method_name, n, n_epochs, lr, data_dir):
+def train_softmax_method(method_name, n, n_epochs, lr, data_dir,
+                         reparam="softmax"):
     """Train a softmax-based method.
 
     Args:
@@ -229,12 +231,14 @@ def train_softmax_method(method_name, n, n_epochs, lr, data_dir):
         n_epochs: number of training epochs
         lr: learning rate
         data_dir: directory for pickle output
+        reparam: reparametrization ("softmax" or "logsoftmax")
 
     Returns:
         sol: solution dict
         history: list of history dicts
     """
     internal_key = _INTERNAL_METHOD_KEY[method_name]
+    theta_2_dt = get_reparam_fn(reparam)
 
     dtype = torch.float32
     A_t = torch.tensor(A, dtype=dtype)
@@ -278,9 +282,10 @@ def train_softmax_method(method_name, n, n_epochs, lr, data_dir):
     sol = sol_dict
 
     # Save results
-    sol_name = f"sol_{method_name}"
-    hist_name = f"history_{method_name}"
-    dist_name = f"dts_dist_{method_name}"
+    suffix = f"_{reparam}" if reparam != "softmax" else ""
+    sol_name = f"sol_{method_name}{suffix}"
+    hist_name = f"history_{method_name}{suffix}"
+    dist_name = f"dts_dist_{method_name}{suffix}"
 
     save_pickle(data_dir, sol_name, sol)
     save_pickle(data_dir, hist_name, history)
@@ -295,7 +300,7 @@ def train_softmax_method(method_name, n, n_epochs, lr, data_dir):
 # ============================================================================ #
 
 def train_one_loss(loss_name, n, n_epochs, lr, lambda0, use_balancing, data_dir,
-                   detach="none"):
+                   detach="none", reparam="softmax"):
     """ZOH3 training loop with one alternative loss as regularizer.
 
     Args:
@@ -303,11 +308,14 @@ def train_one_loss(loss_name, n, n_epochs, lr, lambda0, use_balancing, data_dir,
             "none"  — full gradient through cvxpylayers (default, current behavior)
             "reg"   — detach states/inputs for L_reg only (clean direct gradient)
             "all"   — detach for both L_ocp and L_reg (no cvxpylayers backward)
+        reparam: reparametrization ("softmax" or "logsoftmax")
 
     Returns:
         sol: list of torch tensors (QP solution)
         history: list of dicts with training metrics
     """
+    theta_2_dt = get_reparam_fn(reparam)
+
     dtype = torch.float64
     A_t = torch.tensor(A, dtype=dtype)
     B_t = torch.tensor(B, dtype=dtype)
@@ -407,9 +415,10 @@ def train_one_loss(loss_name, n, n_epochs, lr, lambda0, use_balancing, data_dir,
             )
 
     # Save results
-    save_pickle(data_dir, f"sol_{loss_name}", sol)
-    save_pickle(data_dir, f"history_{loss_name}", history)
-    save_dts_distribution(data_dir, f"dts_dist_{loss_name}", history)
+    suffix = f"_{reparam}" if reparam != "softmax" else ""
+    save_pickle(data_dir, f"sol_{loss_name}{suffix}", sol)
+    save_pickle(data_dir, f"history_{loss_name}{suffix}", history)
+    save_dts_distribution(data_dir, f"dts_dist_{loss_name}{suffix}", history)
 
     print(f"  Final loss: {history[-1]['loss']:.6f}")
     return sol, history
@@ -420,10 +429,10 @@ def train_one_loss(loss_name, n, n_epochs, lr, lambda0, use_balancing, data_dir,
 # ============================================================================ #
 
 def train_custom_loss(loss_weights, n=None, n_epochs=200, lr=3e-2, detach="none",
-                      discretization="zoh"):
+                      discretization="zoh", ocp_weight=1.0, reparam="softmax"):
     """Training loop with a custom composite loss.
 
-    The total loss is:  L_ocp + sum_i (w_i * L_i)
+    The total loss is:  w_ocp * L_ocp + sum_i (w_i * L_i)
 
     Args:
         loss_weights: dict of {loss_name: weight}, e.g. {"L_IV": 0.2, "L_EQ": 0.3}.
@@ -433,6 +442,8 @@ def train_custom_loss(loss_weights, n=None, n_epochs=200, lr=3e-2, detach="none"
         lr: learning rate
         detach: gradient detach mode ("none", "reg", "all")
         discretization: "zoh" (exact ZOH via matrix exp) or "euler" (forward Euler)
+        ocp_weight: weight for L_ocp (default: 1.0)
+        reparam: reparametrization ("softmax" or "logsoftmax")
 
     Returns:
         sol: list of torch tensors (QP solution)
@@ -441,6 +452,8 @@ def train_custom_loss(loss_weights, n=None, n_epochs=200, lr=3e-2, detach="none"
     """
     if discretization not in ("zoh", "euler"):
         raise ValueError(f"discretization must be 'zoh' or 'euler', got '{discretization}'")
+
+    theta_2_dt = get_reparam_fn(reparam)
 
     n = n or n_default
     dtype = torch.float64
@@ -537,7 +550,7 @@ def train_custom_loss(loss_weights, n=None, n_epochs=200, lr=3e-2, detach="none"
                 reg_losses[name] = float(l_reg.item())
                 loss_reg_total = loss_reg_total + w * l_reg
 
-            loss = loss_ocp + loss_reg_total
+            loss = ocp_weight * loss_ocp + loss_reg_total
             loss.backward()
             optim.step()
 
@@ -607,6 +620,11 @@ def main():
         "--data-dir", default=None,
         help="Pickle output directory (default: data/invpend_dt)",
     )
+    parser.add_argument(
+        "--reparam", default="both",
+        choices=[*REPARAM_CHOICES, "both"],
+        help="Reparametrization: softmax, logsoftmax, or both (default: both)",
+    )
 
     args = parser.parse_args()
 
@@ -616,9 +634,12 @@ def main():
     data_dir = args.data_dir or os.path.join(script_dir, "data", "invpend_dt")
     os.makedirs(data_dir, exist_ok=True)
 
+    reparams = list(REPARAM_CHOICES) if args.reparam == "both" else [args.reparam]
+
     save_run_config(data_dir, args)
 
     print(f"Output directory: {data_dir}")
+    print(f"Reparametrizations: {reparams}")
     print(f"Mode: {args.mode}")
     print()
 
@@ -631,16 +652,18 @@ def main():
                     f"Unknown method: {m_name}. Available: {ALL_METHODS}")
 
         print(f"Methods: {methods}")
-        for method_name in methods:
-            n = args.n or DEFAULT_N[method_name]
-            lr = args.lr or DEFAULT_LR[method_name]
-            n_epochs = args.epochs or get_n_epochs(run_mode, method_name)
+        for reparam in reparams:
+            for method_name in methods:
+                n = args.n or DEFAULT_N[method_name]
+                lr = args.lr or DEFAULT_LR[method_name]
+                n_epochs = args.epochs or get_n_epochs(run_mode, method_name)
 
-            print(f"\n{'=' * 40}")
-            print(f"Training {method_name} (n={n}, epochs={n_epochs}, lr={lr})")
-            print(f"{'=' * 40}")
+                print(f"\n{'=' * 40}")
+                print(f"Training {method_name} [{reparam}] (n={n}, epochs={n_epochs}, lr={lr})")
+                print(f"{'=' * 40}")
 
-            train_softmax_method(method_name, n, n_epochs, lr, data_dir)
+                train_softmax_method(method_name, n, n_epochs, lr, data_dir,
+                                     reparam=reparam)
 
     # Alt losses training
     if args.experiment in ("losses", "all"):
@@ -658,18 +681,20 @@ def main():
               f"{'adaptive' if not args.no_balancing else 'fixed'}, "
               f"lambda0={args.lambda0}, detach={args.detach}")
 
-        for loss_name in loss_names:
-            n = args.n or n_default
-            n_epochs = args.epochs or get_n_epochs(run_mode, loss_name)
+        for reparam in reparams:
+            for loss_name in loss_names:
+                n = args.n or n_default
+                n_epochs = args.epochs or get_n_epochs(run_mode, loss_name)
 
-            print(f"\n{'=' * 40}")
-            print(f"Training {loss_name} ({n_epochs} epochs)")
-            print(f"{'=' * 40}")
+                print(f"\n{'=' * 40}")
+                print(f"Training {loss_name} [{reparam}] ({n_epochs} epochs)")
+                print(f"{'=' * 40}")
 
-            train_one_loss(
-                loss_name, n, n_epochs, lr_loss, args.lambda0,
-                not args.no_balancing, data_dir, detach=args.detach,
-            )
+                train_one_loss(
+                    loss_name, n, n_epochs, lr_loss, args.lambda0,
+                    not args.no_balancing, data_dir, detach=args.detach,
+                    reparam=reparam,
+                )
 
     print(f"\nResults saved to: {data_dir}")
 

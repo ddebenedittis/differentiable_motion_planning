@@ -168,7 +168,7 @@ def LQs_LRs_from_dt(dts, Q, R):
 # Parametrization
 # ============================================================================ #
 
-def theta_2_dt(theta, T, n, eps=1e-3):
+def theta_2_dt(theta, T, n, eps=5e-3):
     """Softmax simplex mapping: theta -> non-uniform timesteps summing to T.
 
     Args:
@@ -182,6 +182,39 @@ def theta_2_dt(theta, T, n, eps=1e-3):
     """
     w = torch.softmax(theta.flatten(), dim=0)
     return eps + (T - n * eps) * w
+
+
+def theta_2_dt_logsoftmax(theta, T, n, eps=5e-3):
+    """Log-softmax simplex mapping: theta -> non-uniform timesteps summing to T.
+
+    Routes the gradient through log_softmax (Jacobian entries O(1) near
+    uniform) then exp, instead of a single softmax call (O(1/n) entries).
+    Provides a more informative gradient landscape when samples cluster
+    near T/N (uniform distribution).
+
+    Args:
+        theta: learnable parameters, shape (n, 1) or (n,)
+        T: total time horizon
+        n: number of timesteps
+        eps: minimum timestep duration
+
+    Returns:
+        dts: shape (n,), positive timesteps summing to T
+    """
+    log_w = torch.log_softmax(theta.flatten(), dim=0)
+    return eps + (T - n * eps) * torch.exp(log_w)
+
+
+REPARAM_CHOICES = ("softmax", "logsoftmax")
+
+
+def get_reparam_fn(name):
+    """Return the theta-to-dt mapping function for the given reparametrization."""
+    if name == "softmax":
+        return theta_2_dt
+    if name == "logsoftmax":
+        return theta_2_dt_logsoftmax
+    raise ValueError(f"Unknown reparam: {name}. Available: {REPARAM_CHOICES}")
 
 
 # ============================================================================ #
