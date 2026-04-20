@@ -11,9 +11,7 @@ Usage:
 """
 
 import argparse
-import json
 import os
-import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -22,94 +20,26 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from pann_clqr import create_exact_zoh_cost_clqr
+from pann_clqr import (
+    create_exact_zoh_cost_clqr,
+    A, B, s0, T, Q, R, u_max, n_s, n_u,
+)
 from utils import (
     LOSS_REGISTRY,
     REPARAM_CHOICES,
     AdaptiveGradientBalancer,
     RunMode,
+    build_loss_kwargs,
+    euler_matrices,
     get_n_epochs,
     get_reparam_fn,
     save_dts_distribution,
     save_pickle,
+    save_run_config,
     zoh_cost_matrices,
 )
 
 DISC_CHOICES = ("foe", "zoh")
-
-# ============================================================================ #
-# System Constants (Pannocchia)
-# ============================================================================ #
-
-A = np.array([[-0.1, 0, 0], [0, -2, -6.25], [0, 4, 0]])
-B = np.array([[0.25], [2.0], [0.0]])
-s0 = np.array([1.344, -4.585, 5.674])
-T = 10.0
-Q = 1.0 * np.eye(3)
-R = 0.1 * np.eye(1)
-u_max = 1.0
-n_s = 3
-n_u = 1
-
-
-# ============================================================================ #
-# Helpers
-# ============================================================================ #
-
-def euler_matrices(dt_k, A_t, B_t, Q_t, R_t):
-    """Forward Euler discretization + time-scaled block-diagonal cost matrix.
-
-    Returns (Ad, Bd, W) with the same interface as zoh_cost_matrices so the
-    training loop can branch between ZOH and FOE without structural changes.
-    """
-    n_s = A_t.shape[0]
-    n_u = B_t.shape[1]
-    Ad = torch.eye(n_s, dtype=A_t.dtype) + A_t * dt_k
-    Bd = B_t * dt_k
-    W = torch.zeros(n_s + n_u, n_s + n_u, dtype=A_t.dtype)
-    W[:n_s, :n_s] = Q_t * dt_k
-    W[n_s:, n_s:] = R_t * dt_k
-    return Ad, Bd, W
-
-
-def save_run_config(data_dir, args):
-    """Dump CLI args + git hash to run_config.json."""
-    config = vars(args).copy()
-    try:
-        git_hash = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL
-        ).decode().strip()
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        git_hash = "unknown"
-    config["git_hash"] = git_hash
-    with open(os.path.join(data_dir, "run_config.json"), "w") as f:
-        json.dump(config, f, indent=2)
-
-
-def build_loss_kwargs(loss_name, states, inputs, dts, W_list, Ad_list, Bd_list,
-                      A_t, B_t, Q_t, R_t, T_val, u_max_val):
-    """Dispatch correct kwargs to each loss function."""
-    if loss_name == "L_SSD":
-        return dict(dts=dts)
-    elif loss_name == "L_IV":
-        return dict(inputs=inputs, dts=dts)
-    elif loss_name == "L_EQ":
-        return dict(inputs=inputs)
-    elif loss_name == "L_CPC":
-        return dict(inputs=inputs, dts=dts, u_max=u_max_val)
-    elif loss_name == "L_CSS":
-        return dict(inputs=inputs, dts=dts, u_max=u_max_val)
-    elif loss_name == "L_defect":
-        return dict(states=states, inputs=inputs, dts=dts, W_list=W_list, Q=Q_t, R=R_t)
-    elif loss_name == "L_dyn":
-        return dict(states=states, inputs=inputs, dts=dts, A=A_t, B=B_t,
-                    Ad_list=Ad_list, Bd_list=Bd_list)
-    elif loss_name == "L_equi":
-        return dict(states=states, inputs=inputs, dts=dts, A=A_t, B=B_t, Q=Q_t)
-    elif loss_name == "L_FI":
-        return dict(states=states, inputs=inputs, dts=dts, A=A_t, B=B_t, Q=Q_t, T=T_val)
-    else:
-        raise ValueError(f"Unknown loss: {loss_name}")
 
 
 # ============================================================================ #
@@ -183,7 +113,7 @@ def train_one_loss(loss_name, n, n_epochs, lr, lambda0, use_balancing, data_dir,
             # L_reg: alternative loss
             kwargs = build_loss_kwargs(
                 loss_name, states, inputs, dts_torch, W_list, Ad_list, Bd_list,
-                A_t, B_t, Q_t, R_t, T, u_max,
+                A_t, B_t, Q_t, R_t, T=T, u_max=u_max,
             )
             loss_reg = loss_fn(**kwargs)
 

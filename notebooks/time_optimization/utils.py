@@ -1,7 +1,9 @@
 """General-purpose utilities for differentiable time optimization experiments."""
 
+import json
 import os
 import pickle
+import subprocess
 from enum import Enum
 
 import matplotlib.pyplot as plt
@@ -162,6 +164,22 @@ def LQs_LRs_from_dt(dts, Q, R):
     LQs = [torch.sqrt(dt) * LQ0 for dt in dts]
     LRs = [torch.sqrt(dt) * LR0 for dt in dts]
     return LQs, LRs
+
+
+def euler_matrices(dt_k, A_t, B_t, Q_t, R_t):
+    """Forward Euler discretization + time-scaled block-diagonal cost matrix.
+
+    Returns (Ad, Bd, W) with the same interface as zoh_cost_matrices so the
+    training loop can branch without structural changes.
+    """
+    n_s = A_t.shape[0]
+    n_u = B_t.shape[1]
+    Ad = torch.eye(n_s, dtype=A_t.dtype) + A_t * dt_k
+    Bd = B_t * dt_k
+    W = torch.zeros(n_s + n_u, n_s + n_u, dtype=A_t.dtype)
+    W[:n_s, :n_s] = Q_t * dt_k
+    W[n_s:, n_s:] = R_t * dt_k
+    return Ad, Bd, W
 
 
 # ============================================================================ #
@@ -609,6 +627,43 @@ LOSS_REGISTRY = {
 }
 
 
+def build_loss_kwargs(loss_name, states, inputs, dts, W_list, Ad_list, Bd_list,
+                      A_t, B_t, Q_t, R_t, *, T, u_max, x_max=None):
+    """Dispatch correct kwargs to each loss function.
+
+    All system-specific values (T, u_max, x_max) are passed explicitly.
+    """
+    if loss_name == "L_SSD":
+        return dict(dts=dts)
+    elif loss_name == "L_IV":
+        return dict(inputs=inputs, dts=dts)
+    elif loss_name == "L_EQ":
+        return dict(inputs=inputs)
+    elif loss_name == "L_CPC":
+        return dict(inputs=inputs, dts=dts, u_max=u_max)
+    elif loss_name == "L_CSS":
+        return dict(inputs=inputs, dts=dts, u_max=u_max)
+    elif loss_name == "L_defect":
+        return dict(states=states, inputs=inputs, dts=dts, W_list=W_list,
+                    Q=Q_t, R=R_t)
+    elif loss_name == "L_dyn":
+        return dict(states=states, inputs=inputs, dts=dts, A=A_t, B=B_t,
+                    Ad_list=Ad_list, Bd_list=Bd_list)
+    elif loss_name == "L_equi":
+        return dict(states=states, inputs=inputs, dts=dts, A=A_t, B=B_t, Q=Q_t)
+    elif loss_name == "L_FI":
+        return dict(states=states, inputs=inputs, dts=dts, A=A_t, B=B_t, Q=Q_t,
+                    T=T)
+    elif loss_name == "L_SC":
+        return dict(states=states, inputs=inputs, dts=dts, A=A_t, B=B_t,
+                    x_max=x_max)
+    elif loss_name == "L_PWLH":
+        return dict(states=states, inputs=inputs, dts=dts, A=A_t, B=B_t,
+                    Q=Q_t, R=R_t)
+    else:
+        raise ValueError(f"Unknown loss: {loss_name}")
+
+
 # ============================================================================ #
 # Adaptive Gradient Balancing
 # ============================================================================ #
@@ -807,6 +862,20 @@ def load_pickle(out_dir, name):
         return pickle.load(f)
 
 
+def save_run_config(data_dir, args):
+    """Dump CLI args + git hash to run_config.json."""
+    config = vars(args).copy()
+    try:
+        git_hash = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL
+        ).decode().strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        git_hash = "unknown"
+    config["git_hash"] = git_hash
+    with open(os.path.join(data_dir, "run_config.json"), "w") as f:
+        json.dump(config, f, indent=2)
+
+
 def save_dts_distribution(out_dir, name, history):
     """Save full dts distribution across all epochs as a numpy array.
 
@@ -922,20 +991,6 @@ def compute_trajectory_metrics(data, n, T):
     }
 
 
-def compute_cross_correlation(x, y, max_lag=20):
-    """Normalized cross-correlation. Positive lag: x[k] vs y[k+lag]."""
-    x = (x - np.mean(x)) / (np.std(x) + 1e-10)
-    y = (y - np.mean(y)) / (np.std(y) + 1e-10)
-    m = min(len(x), len(y))
-    lags = np.arange(-max_lag, max_lag + 1)
-    ccf = np.array([
-        np.mean(x[:m - lag] * y[lag:m]) if lag >= 0
-        else np.mean(x[-lag:m] * y[:m + lag])
-        for lag in lags if (m - abs(lag)) > 0
-    ])
-    return lags, ccf
-
-
 def plot_density_and_changes(data, metrics, method_name, colors, axes=None):
     """Plot sampling density, |Delta u|, and ||Delta s|| on the same axes."""
     times = data['times']
@@ -949,48 +1004,316 @@ def plot_density_and_changes(data, metrics, method_name, colors, axes=None):
     ax.legend(loc='upper right', fontsize=7)
 
 
-def plot_cross_correlations(data, metrics, method_name, colors, max_lag=30):
-    """Plot cross-correlation between sampling density and trajectory metrics."""
-    sd = metrics['sampling_density']
-    times = data['times']
-    n = len(sd)
-    sig_bound = 1.96 / np.sqrt(n)
+# ============================================================================ #
+# Shared Plotting Helpers (used by per-example plot scripts)
+# ============================================================================ #
 
-    quantities = [
-        ('delta_u', r'$|\Delta u|$', sd[:-1]),
-        ('delta_s', r'$\|\Delta s\|_2$', sd[:-1]),
-        ('abs_u', r'$|u|$', sd),
-        ('norm_s', r'$\|s\|_2$', sd),
-        ('time', r'$t$', sd),
-    ]
+from dataclasses import dataclass
 
-    metrics_with_time = {**metrics, 'time': times}
 
-    fig, axs = plt.subplots(1, len(quantities), figsize=(2.8 * len(quantities), 2.8))
+@dataclass(frozen=True)
+class MethodConfig:
+    """Configuration for loading a method's pickle results."""
+    key: str
+    sol_pickle: str
+    history_pickle: str
+    internal_methods: tuple[str, ...]
+    sol_method: int = 2
+    uses_custom_n: bool = False
 
-    for ax, (key, label, sd_aligned) in zip(axs, quantities):
-        metric_vals = metrics_with_time[key]
-        if len(metric_vals) > len(sd_aligned):
-            metric_vals = metric_vals[:len(sd_aligned)]
-        lags, ccf = compute_cross_correlation(sd_aligned, metric_vals, max_lag=max_lag)
-        ax.plot(lags, ccf, color=colors[0], marker='o', markersize=2)
-        ax.axhline(0, color='gray', linestyle='-', alpha=0.3)
-        ax.axvline(0, color='gray', linestyle='--', alpha=0.3)
-        ax.axhline(sig_bound, color=colors[5], linestyle=':', alpha=0.5)
-        ax.axhline(-sig_bound, color=colors[5], linestyle=':', alpha=0.5)
-        ax.set(xlabel='Lag', ylabel='CCF', title=f'SD vs {label}')
 
-        peak_idx = np.argmax(np.abs(ccf))
-        peak_lag, peak_val = lags[peak_idx], ccf[peak_idx]
+def load_method_results(data_dir, method_configs, suffix=""):
+    """Load all available method results from pickle files.
 
-        y_offset = -25 if peak_val > 0 else 15
-        ax.annotate(
-            f'{peak_val:.2f} @ {peak_lag}',
-            xy=(peak_lag, peak_val), fontsize=8,
-            xytext=(0, y_offset), textcoords='offset points',
-            ha='center',
-            bbox=dict(boxstyle='round,pad=0.2', fc='white', alpha=0.7),
-        )
+    Args:
+        data_dir: directory containing pickles
+        method_configs: list of MethodConfig instances
+        suffix: pickle name suffix (e.g. "_logsoftmax")
 
-    fig.suptitle(f'{method_name}', fontsize=11)
-    return fig
+    Returns:
+        results: dict of {method_name: {sol, history, n, internal_methods, sol_method}}
+    """
+    results = {}
+
+    for cfg in method_configs:
+        try:
+            sol = load_pickle(data_dir, cfg.sol_pickle + suffix)
+            history = load_pickle(data_dir, cfg.history_pickle + suffix)
+            n_inferred = len(np.array(history[-1]['dts']).flatten())
+            results[cfg.key] = {
+                "sol": sol,
+                "history": history,
+                "n": n_inferred,
+                "internal_methods": list(cfg.internal_methods),
+                "sol_method": cfg.sol_method,
+            }
+        except (FileNotFoundError, OSError):
+            pass
+
+    return results
+
+
+def load_loss_results(data_dir, loss_names=None, suffix=""):
+    """Load all available loss results from pickle files.
+
+    Args:
+        loss_names: None (no losses), "all" (all available), or list of names.
+        suffix: pickle name suffix (e.g. "_logsoftmax")
+
+    Returns:
+        results: dict of {loss_name: {"sol": ..., "history": ..., "n": ...}}
+    """
+    if loss_names is None:
+        return {}
+    if loss_names == "all":
+        candidates = list(LOSS_REGISTRY.keys())
+    else:
+        candidates = loss_names
+    results = {}
+
+    for loss_name in candidates:
+        try:
+            sol = load_pickle(data_dir, f"sol_{loss_name}{suffix}")
+            history = load_pickle(data_dir, f"history_{loss_name}{suffix}")
+            n_inferred = len(np.array(history[-1]['dts']).flatten())
+            results[loss_name] = {"sol": sol, "history": history, "n": n_inferred}
+        except (FileNotFoundError, OSError):
+            pass
+
+    return results
+
+
+def plot_method_results(name, result, results_dir, show=False):
+    """Plot training results for a single method (2x2 grid per sub-method)."""
+    sol_dict = result["sol"]
+    history = result["history"]
+    n_method = result["n"]
+    sol_method = result.get("sol_method", 2)
+    internal_methods = result["internal_methods"]
+
+    for method in internal_methods:
+        sol = sol_dict[method]
+        hist_m = [h for h in history if h['method'] == method]
+        if not hist_m:
+            print(f"  No history for {name}/{method}, skipping")
+            continue
+
+        plot_training_res(sol, hist_m, n_method, sol_method=sol_method)
+        plt.suptitle(f"{name}: {method}")
+
+        if results_dir:
+            _key = method.replace(' ', '_')
+            save_training_res(results_dir, f"{name}_{_key}", sol, hist_m,
+                              n_method, sol_method)
+
+        if not show:
+            plt.close('all')
+
+
+def plot_loss_results(loss_name, result, results_dir, show=False):
+    """Plot training results for a single loss (2x2 grid)."""
+    sol = result["sol"]
+    history = result["history"]
+    n = result["n"]
+
+    plot_training_res(sol, history, n, sol_method=2)
+    plt.suptitle(loss_name)
+
+    if results_dir:
+        save_training_res(results_dir, loss_name, sol, history, n, sol_method=2)
+
+    if not show:
+        plt.close('all')
+
+
+def plot_loss_comparison(loss_results, results_dir, show=False,
+                         filename="loss_comparison"):
+    """Side-by-side timestep distributions for all losses."""
+    if len(loss_results) <= 1:
+        return
+
+    n_losses = len(loss_results)
+    fig, axes = plt.subplots(1, n_losses, figsize=(3.2 * n_losses, 3.2))
+    if n_losses == 1:
+        axes = [axes]
+
+    for ax, (loss_name, result) in zip(axes, loss_results.items()):
+        history = result["history"]
+        dts_final = history[-1]['dts'].flatten()
+        times = np.cumsum(dts_final)
+        ax.plot(times, dts_final)
+        ax.set_xlabel("Time")
+        ax.set_ylabel("dt")
+        ax.set_title(loss_name)
+
+    fig.set_constrained_layout(True)
+
+    if results_dir:
+        os.makedirs(results_dir, exist_ok=True)
+        fig.savefig(os.path.join(results_dir, f"{filename}.pdf"),
+                    bbox_inches='tight')
+
+    if not show:
+        plt.close(fig)
+
+
+def plot_density_analysis_grid(method_solutions, T, colors, results_dir,
+                               show=False):
+    """Plot sampling density vs trajectory changes for all methods."""
+    n_methods = len(method_solutions)
+    if n_methods == 0:
+        return
+
+    n_rows = int(np.ceil(n_methods / 2))
+    fig, axs = plt.subplots(n_rows, 2, figsize=(10, 2.5 * n_rows),
+                            squeeze=False)
+
+    for i, (key, ms) in enumerate(method_solutions.items()):
+        n_m = ms['n']
+        data = extract_trajectory_data(ms, n_m)
+        metrics = compute_trajectory_metrics(data, n_m, T)
+        plot_density_and_changes(data, metrics, key, colors,
+                                axes=axs[i // 2, i % 2])
+
+    for j in range(i + 1, n_rows * 2):
+        fig.delaxes(axs[j // 2, j % 2])
+
+    fig.set_constrained_layout(True)
+
+    if results_dir:
+        os.makedirs(results_dir, exist_ok=True)
+        fig.savefig(os.path.join(results_dir, "density_analysis.pdf"),
+                    bbox_inches='tight')
+
+    if not show:
+        plt.close(fig)
+
+
+def print_continuous_costs(method_results, loss_results, *, s0_eval, A, B, Q,
+                           R, T):
+    """Evaluate and print true continuous-time costs."""
+    print("=== True Continuous-Time Cost Comparison ===\n")
+
+    for name, result in method_results.items():
+        sol_dict = result["sol"]
+        history = result["history"]
+        n_method = result["n"]
+
+        for method in result["internal_methods"]:
+            sol = sol_dict[method]
+            hist_m = [h for h in history if h['method'] == method]
+            if not hist_m:
+                continue
+
+            dts_final = hist_m[-1]['dts']
+            inputs_qp = [sol[n_method + i].detach().float()
+                         for i in range(n_method)]
+
+            try:
+                true_cost = evaluate_continuous_cost(
+                    inputs_qp, dts_final, s0_eval, A, B, Q, R, T,
+                )
+            except Exception as exc:
+                print(f"{name} ({method}): cost evaluation failed: {exc}")
+                continue
+
+            print(f"{name} ({method}):")
+            print(f"  Training loss (final): {hist_m[-1]['loss']:.4f}")
+            print(f"  True continuous cost:  {true_cost:.4f}")
+            if isinstance(dts_final, np.ndarray):
+                print(f"  dt range: [{np.min(dts_final):.5f}, "
+                      f"{np.max(dts_final):.5f}]")
+                print(f"  dt std:   {np.std(dts_final):.5f}")
+            print()
+
+    for loss_name, result in loss_results.items():
+        sol = result["sol"]
+        history = result["history"]
+        n_loss = result["n"]
+
+        dts_final = history[-1]['dts']
+        inputs_qp = [sol[n_loss + k].detach().float() for k in range(n_loss)]
+
+        try:
+            true_cost = evaluate_continuous_cost(
+                inputs_qp, dts_final, s0_eval, A, B, Q, R, T,
+            )
+        except Exception as exc:
+            print(f"{loss_name}: cost evaluation failed: {exc}")
+            continue
+
+        print(f"{loss_name}:")
+        print(f"  Training loss (final):  {history[-1]['loss']:.4f}")
+        print(f"  Loss OCP (final):       {history[-1].get('loss_ocp', 'N/A')}")
+        print(f"  Loss reg (final):       {history[-1].get('loss_reg', 'N/A')}")
+        print(f"  Lambda hat (final):     {history[-1].get('lambda_hat', 'N/A')}")
+        print(f"  True continuous cost:   {true_cost:.4f}")
+        if isinstance(dts_final, np.ndarray):
+            print(f"  dt range: [{np.min(dts_final):.5f}, "
+                  f"{np.max(dts_final):.5f}]")
+            print(f"  dt std:   {np.std(dts_final):.5f}")
+        print()
+
+
+def save_summary(method_results, loss_results, results_dir, *, s0_eval, A, B,
+                 Q, R, T):
+    """Compute and save metrics summary JSON."""
+    summary = {}
+
+    for name, result in method_results.items():
+        for method in result["internal_methods"]:
+            sol = result["sol"][method]
+            hist_m = [h for h in result["history"]
+                      if h['method'] == method]
+            if not hist_m:
+                continue
+            n_m = result["n"]
+            dts_final = hist_m[-1]['dts']
+            inputs_qp = [sol[n_m + i].detach().float() for i in range(n_m)]
+            try:
+                cont_cost = evaluate_continuous_cost(
+                    inputs_qp, dts_final, s0_eval, A, B, Q, R, T)
+            except Exception:
+                cont_cost = None
+            summary[f"{name}_{method}"] = {
+                "continuous_cost": cont_cost,
+                "final_loss": hist_m[-1]['loss'],
+            }
+
+    for loss_name, result in loss_results.items():
+        sol = result["sol"]
+        history = result["history"]
+        n_loss = result["n"]
+        dts_final = history[-1]['dts']
+        inputs_qp = [sol[n_loss + k].detach().float() for k in range(n_loss)]
+        try:
+            cont_cost = evaluate_continuous_cost(
+                inputs_qp, dts_final, s0_eval, A, B, Q, R, T)
+        except Exception:
+            cont_cost = None
+        entry = {
+            "continuous_cost": cont_cost,
+            "final_loss": history[-1]['loss'],
+        }
+        if 'loss_ocp' in history[-1]:
+            entry["final_loss_ocp"] = history[-1]['loss_ocp']
+            entry["final_loss_reg"] = history[-1]['loss_reg']
+            entry["final_lambda_hat"] = history[-1]['lambda_hat']
+        summary[loss_name] = entry
+
+    if results_dir:
+        os.makedirs(results_dir, exist_ok=True)
+        with open(os.path.join(results_dir, "summary.json"), "w") as f:
+            json.dump(summary, f, indent=2)
+
+    print("\n" + "=" * 60)
+    print("RESULTS SUMMARY")
+    print("=" * 60)
+    for label, metrics in summary.items():
+        cost_str = (f"{metrics['continuous_cost']:.6f}"
+                    if metrics['continuous_cost'] is not None else "N/A")
+        print(f"\n{label}:")
+        print(f"  Continuous cost:  {cost_str}")
+        print(f"  Final loss:       {metrics['final_loss']:.6f}")
+
+    return summary

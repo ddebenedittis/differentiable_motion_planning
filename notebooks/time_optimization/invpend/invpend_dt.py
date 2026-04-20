@@ -16,9 +16,7 @@ Usage:
 """
 
 import argparse
-import json
 import os
-import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -30,120 +28,28 @@ from tqdm import tqdm
 from invpend_clqr import (
     create_invpend_rep_clqr,
     create_invpend_zoh_clqr,
+    A, B, s0, s_goal, T, n_default, Q, R, u_max, v_max, theta_max, x_max, n_s, n_u, e0,
 )
 from utils import (
     LOSS_REGISTRY,
     REPARAM_CHOICES,
     AdaptiveGradientBalancer,
     RunMode,
+    build_loss_kwargs,
+    euler_matrices,
     get_n_epochs,
     get_reparam_fn,
     save_dts_distribution,
     save_pickle,
+    save_run_config,
     task_loss,
     zoh_cost_matrices,
 )
-
-# ============================================================================ #
-# System Constants (Linearized Cart-Pole)
-# ============================================================================ #
-
-m_p, M_c, l_p, g_val = 0.2, 1.0, 0.5, 9.81
-
-A = np.array([
-    [0, 1, 0, 0],
-    [0, 0, -m_p * g_val / M_c, 0],
-    [0, 0, 0, 1],
-    [0, 0, (M_c + m_p) * g_val / (M_c * l_p), 0],
-])
-B = np.array([[0], [1 / M_c], [0], [-1 / (M_c * l_p)]])
-
-s0 = np.array([0.0, 0.0, 0.1, 0.0])        # perturbed pole
-s_goal = np.array([5.0, 0.0, 0.0, 0.0])     # go to x=5, stop, upright
-T = 5.0
-n_default = 40
-Q = np.diag([1.0, 0.1, 10.0, 0.1])          # penalize angle heavily
-R = 0.01 * np.eye(1)
-u_max = 10.0                                  # F_max
-v_max = 2.0                                   # velocity constraint
-theta_max = 0.15                               # angle constraint (~8.6 deg)
-x_max = {1: v_max, 2: theta_max}
-n_s = 4
-n_u = 1
-e0 = s0 - s_goal                              # error initial state
 
 ALL_METHODS = ["rep", "zoh"]
 
 DEFAULT_N = {"rep": 40, "zoh": 20}
 DEFAULT_LR = {"rep": 1e-2, "zoh": 1e-2}
-
-
-# ============================================================================ #
-# Helpers
-# ============================================================================ #
-
-def euler_matrices(dt_k, A_t, B_t, Q_t, R_t):
-    """Forward Euler discretization + time-scaled block-diagonal cost matrix.
-
-    Returns (Ad, Bd, W) with the same interface as zoh_cost_matrices so the
-    training loop can branch without structural changes.
-    """
-    _n_s = A_t.shape[0]
-    _n_u = B_t.shape[1]
-    Ad = torch.eye(_n_s, dtype=A_t.dtype) + A_t * dt_k
-    Bd = B_t * dt_k
-    W = torch.zeros(_n_s + _n_u, _n_s + _n_u, dtype=A_t.dtype)
-    W[:_n_s, :_n_s] = Q_t * dt_k
-    W[_n_s:, _n_s:] = R_t * dt_k
-    return Ad, Bd, W
-
-
-def save_run_config(data_dir, args):
-    """Dump CLI args + git hash to run_config.json."""
-    config = vars(args).copy()
-    try:
-        git_hash = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL
-        ).decode().strip()
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        git_hash = "unknown"
-    config["git_hash"] = git_hash
-    with open(os.path.join(data_dir, "run_config.json"), "w") as f:
-        json.dump(config, f, indent=2)
-
-
-def build_loss_kwargs(loss_name, states, inputs, dts, W_list, Ad_list, Bd_list,
-                      A_t, B_t, Q_t, R_t):
-    """Dispatch correct kwargs to each loss function."""
-    if loss_name == "L_SSD":
-        return dict(dts=dts)
-    elif loss_name == "L_IV":
-        return dict(inputs=inputs, dts=dts)
-    elif loss_name == "L_EQ":
-        return dict(inputs=inputs)
-    elif loss_name == "L_CPC":
-        return dict(inputs=inputs, dts=dts, u_max=u_max)
-    elif loss_name == "L_CSS":
-        return dict(inputs=inputs, dts=dts, u_max=u_max)
-    elif loss_name == "L_defect":
-        return dict(states=states, inputs=inputs, dts=dts, W_list=W_list,
-                    Q=Q_t, R=R_t)
-    elif loss_name == "L_dyn":
-        return dict(states=states, inputs=inputs, dts=dts, A=A_t, B=B_t,
-                    Ad_list=Ad_list, Bd_list=Bd_list)
-    elif loss_name == "L_equi":
-        return dict(states=states, inputs=inputs, dts=dts, A=A_t, B=B_t, Q=Q_t)
-    elif loss_name == "L_FI":
-        return dict(states=states, inputs=inputs, dts=dts, A=A_t, B=B_t, Q=Q_t,
-                    T=T)
-    elif loss_name == "L_SC":
-        return dict(states=states, inputs=inputs, dts=dts, A=A_t, B=B_t,
-                    x_max=x_max)
-    elif loss_name == "L_PWLH":
-        return dict(states=states, inputs=inputs, dts=dts, A=A_t, B=B_t,
-                    Q=Q_t, R=R_t)
-    else:
-        raise ValueError(f"Unknown loss: {loss_name}")
 
 
 # ============================================================================ #
@@ -383,7 +289,7 @@ def train_one_loss(loss_name, n, n_epochs, lr, lambda0, use_balancing, data_dir,
             # L_reg: alternative loss
             kwargs = build_loss_kwargs(
                 loss_name, states_reg, inputs_reg, dts_torch, W_list, Ad_list,
-                Bd_list, A_t, B_t, Q_t, R_t,
+                Bd_list, A_t, B_t, Q_t, R_t, T=T, u_max=u_max, x_max=x_max,
             )
             loss_reg = loss_fn(**kwargs)
 

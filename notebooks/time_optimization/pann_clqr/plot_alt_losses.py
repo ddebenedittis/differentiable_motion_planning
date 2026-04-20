@@ -21,94 +21,37 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import matplotlib.pyplot as plt
 import numpy as np
 
+from pann_clqr import A, B, s0, T, Q, R, u_max, n_s, n_u
 from utils import (
     LOSS_REGISTRY,
     REPARAM_CHOICES,
-    compute_trajectory_metrics,
+    load_loss_results,
+    plot_loss_results,
+    plot_loss_comparison,
+    plot_density_analysis_grid,
     evaluate_continuous_cost,
-    extract_trajectory_data,
     load_pickle,
-    plot_cross_correlations,
-    plot_density_and_changes,
     plot_training_res,
     save_training_res,
+    extract_trajectory_data,
+    compute_trajectory_metrics,
+    plot_density_and_changes,
     save_timesteps_video,
 )
-
-# ============================================================================ #
-# System Constants (Pannocchia) — needed for cost evaluation
-# ============================================================================ #
-
-A = np.array([[-0.1, 0, 0], [0, -2, -6.25], [0, 4, 0]])
-B = np.array([[0.25], [2.0], [0.0]])
-s0 = np.array([1.344, -4.585, 5.674])
-T = 10.0
-Q = 1.0 * np.eye(3)
-R = 0.1 * np.eye(1)
-u_max = 1.0
-n_s = 3
-n_u = 1
-
-
-# ============================================================================ #
-# Load Results
-# ============================================================================ #
-
-def load_all_results(data_dir, loss_names=None, suffix=""):
-    """Load all available loss results from pickle files.
-
-    Args:
-        data_dir: directory containing pickle files
-        loss_names: list of loss names to load, or None for all registered losses
-        suffix: pickle name suffix (e.g. "_logsoftmax" for logsoftmax results)
-
-    Returns:
-        results: dict of {loss_name: {"sol": ..., "history": ...}}
-    """
-    candidates = loss_names or list(LOSS_REGISTRY.keys())
-    results = {}
-
-    for loss_name in candidates:
-        try:
-            sol = load_pickle(data_dir, f"sol_{loss_name}{suffix}")
-            history = load_pickle(data_dir, f"history_{loss_name}{suffix}")
-            results[loss_name] = {"sol": sol, "history": history}
-        except (FileNotFoundError, OSError):
-            pass
-
-    return results
-
-
-# ============================================================================ #
-# Per-Loss Plots
-# ============================================================================ #
-
-def plot_loss_results(loss_name, result, n, results_dir, show=False):
-    """Plot training results for a single loss (2x2 grid)."""
-    sol = result["sol"]
-    history = result["history"]
-
-    plot_training_res(sol, history, n, sol_method=2)
-    plt.suptitle(loss_name)
-
-    if results_dir:
-        save_training_res(results_dir, loss_name, sol, history, n, sol_method=2)
-
-    if not show:
-        plt.close('all')
 
 
 # ============================================================================ #
 # Continuous Cost Evaluation
 # ============================================================================ #
 
-def print_continuous_costs(all_results, n):
+def print_continuous_costs(all_results):
     """Evaluate and print true continuous-time costs for all losses."""
     print("=== True Continuous-Time Cost Comparison ===\n")
 
     for loss_name, result in all_results.items():
         sol = result["sol"]
         history = result["history"]
+        n = result["n"]
 
         dts_final = history[-1]['dts']
         inputs_qp = [sol[n + k].detach().float() for k in range(n)]
@@ -137,7 +80,7 @@ def print_continuous_costs(all_results, n):
 # Cross-Loss Analysis
 # ============================================================================ #
 
-def _build_method_solutions(all_results, n):
+def _build_method_solutions(all_results):
     """Build the method_solutions dict used for density/cross-correlation plots."""
     method_solutions = {}
 
@@ -146,97 +89,20 @@ def _build_method_solutions(all_results, n):
             'sol': result['sol'],
             'history': result['history'],
             'sol_method': 2,
-            'n': n,
+            'n': result['n'],
         }
 
     return method_solutions
 
 
-def plot_density_analysis(method_solutions, colors, results_dir, show=False):
-    """Plot sampling density vs trajectory changes for all losses."""
-    n_methods = len(method_solutions)
-    if n_methods == 0:
-        return
-
-    n_rows = int(np.ceil(n_methods / 2))
-    fig, axs = plt.subplots(n_rows, 2, figsize=(10, 2.5 * n_rows), squeeze=False)
-
-    for i, (key, ms) in enumerate(method_solutions.items()):
-        n_m = ms['n']
-        data = extract_trajectory_data(ms, n_m)
-        metrics = compute_trajectory_metrics(data, n_m, T)
-        plot_density_and_changes(data, metrics, key, colors, axes=axs[i // 2, i % 2])
-
-    # Remove unused axes
-    for j in range(i + 1, n_rows * 2):
-        fig.delaxes(axs[j // 2, j % 2])
-
-    fig.set_constrained_layout(True)
-
-    if results_dir:
-        os.makedirs(results_dir, exist_ok=True)
-        fig.savefig(os.path.join(results_dir, "density_analysis.pdf"), bbox_inches='tight')
-
-    if not show:
-        plt.close(fig)
-
-
-def plot_cross_correlation_analysis(method_solutions, colors, results_dir, show=False):
-    """Plot cross-correlation for all losses."""
-    for key, ms in method_solutions.items():
-        n_m = ms['n']
-        data = extract_trajectory_data(ms, n_m)
-        metrics = compute_trajectory_metrics(data, n_m, T)
-        fig = plot_cross_correlations(data, metrics, key, colors, max_lag=30)
-
-        if results_dir:
-            os.makedirs(results_dir, exist_ok=True)
-            safe_key = key.replace(" ", "_").replace(":", "").replace("(", "").replace(")", "")
-            fig.savefig(
-                os.path.join(results_dir, f"cross_corr_{safe_key}.pdf"),
-                bbox_inches='tight',
-            )
-
-        if not show:
-            plt.close(fig)
-
-
-def plot_comparison(all_results, results_dir, show=False):
-    """Comparison plot: final timesteps for all losses."""
-    if len(all_results) <= 1:
-        return
-
-    n_losses = len(all_results)
-    fig, axes = plt.subplots(1, n_losses, figsize=(3.2 * n_losses, 3.2))
-    if n_losses == 1:
-        axes = [axes]
-
-    for ax, (loss_name, result) in zip(axes, all_results.items()):
-        history = result["history"]
-        dts_final = history[-1]['dts'].flatten()
-        times = np.cumsum(dts_final)
-        ax.plot(times, dts_final)
-        ax.set_xlabel("Time")
-        ax.set_ylabel("dt")
-        ax.set_title(loss_name)
-
-    fig.set_constrained_layout(True)
-
-    if results_dir:
-        os.makedirs(results_dir, exist_ok=True)
-        fig.savefig(os.path.join(results_dir, "comparison.pdf"), bbox_inches='tight')
-
-    if not show:
-        plt.close(fig)
-
-
-def save_summary(all_results, n, results_dir):
+def save_summary(all_results, results_dir):
     """Compute and save metrics summary JSON."""
     summary = {}
 
     for loss_name, result in all_results.items():
         sol = result["sol"]
         history = result["history"]
+        n = result["n"]
 
         dts_final = history[-1]['dts']
         inputs_qp = [sol[n + k].detach().float() for k in range(n)]
@@ -312,7 +178,6 @@ def main():
         "--loss", nargs="+", default=None,
         help="Which losses to plot (default: all available)",
     )
-    parser.add_argument("--n", type=int, default=160, help="Number of timesteps")
     parser.add_argument("--analysis-only", action="store_true", help="Only cross-loss analysis plots")
     parser.add_argument("--show", action="store_true", help="Display plots interactively")
     parser.add_argument("--save-video", action="store_true", help="Save timestep evolution videos")
@@ -348,7 +213,7 @@ def main():
         print(f"# Reparametrization: {reparam}")
         print(f"{'#' * 50}")
         print(f"Loading data from: {data_dir}")
-        all_results = load_all_results(data_dir, loss_names=args.loss,
+        all_results = load_loss_results(data_dir, loss_names=args.loss or "all",
                                        suffix=suffix)
 
         if not all_results:
@@ -362,23 +227,22 @@ def main():
             # Per-loss plots
             for loss_name, result in all_results.items():
                 print(f"Plotting {loss_name}...")
-                plot_loss_results(loss_name, result, args.n, results_dir, show=args.show)
+                plot_loss_results(loss_name, result, results_dir, show=args.show)
 
             # Continuous costs
-            print_continuous_costs(all_results, args.n)
+            print_continuous_costs(all_results)
 
             # Comparison plot
-            plot_comparison(all_results, results_dir, show=args.show)
+            plot_loss_comparison(all_results, results_dir, show=args.show, filename="comparison")
 
         # Cross-loss analysis
-        method_solutions = _build_method_solutions(all_results, args.n)
+        method_solutions = _build_method_solutions(all_results)
         if method_solutions:
             print(f"Analysis: {len(method_solutions)} losses")
-            plot_density_analysis(method_solutions, colors, results_dir, show=args.show)
-            plot_cross_correlation_analysis(method_solutions, colors, results_dir, show=args.show)
+            plot_density_analysis_grid(method_solutions, T, colors, results_dir, show=args.show)
 
         # Summary
-        save_summary(all_results, args.n, results_dir)
+        save_summary(all_results, results_dir)
 
         # Timestep evolution videos
         if args.save_video:

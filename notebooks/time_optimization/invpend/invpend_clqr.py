@@ -16,6 +16,34 @@ import cvxpy as cp
 from cvxpylayers.torch import CvxpyLayer
 import numpy as np
 
+# ============================================================================ #
+# System Constants (Linearized Cart-Pole)
+# ============================================================================ #
+
+m_p, M_c, l_p, g_val = 0.2, 1.0, 0.5, 9.81
+
+A = np.array([
+    [0, 1, 0, 0],
+    [0, 0, -m_p * g_val / M_c, 0],
+    [0, 0, 0, 1],
+    [0, 0, (M_c + m_p) * g_val / (M_c * l_p), 0],
+])
+B = np.array([[0], [1 / M_c], [0], [-1 / (M_c * l_p)]])
+
+s0 = np.array([0.0, 0.0, 0.1, 0.0])
+s_goal = np.array([5.0, 0.0, 0.0, 0.0])
+T = 5.0
+n_default = 40
+Q = np.diag([1.0, 0.1, 10.0, 0.1])
+R = 0.01 * np.eye(1)
+u_max = 10.0
+v_max = 2.0
+theta_max = 0.15
+x_max = {1: v_max, 2: theta_max}
+n_s = 4
+n_u = 1
+e0 = s0 - s_goal
+
 
 def _validate_error_coords(s_goal, x_max):
     """Assert that s_goal is zero at all constrained state indices."""

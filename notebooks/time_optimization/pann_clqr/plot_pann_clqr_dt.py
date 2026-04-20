@@ -22,7 +22,10 @@ from dataclasses import dataclass
 import matplotlib.pyplot as plt
 import numpy as np
 
-from pann_clqr import create_pann_clqr
+from pann_clqr import (
+    create_pann_clqr,
+    A, B, s0, T, Q, R, u_max, n_s, n_u,
+)
 from utils import (
     REPARAM_CHOICES,
     pickle_name,
@@ -33,7 +36,6 @@ from utils import (
     extract_trajectory_data,
     compute_trajectory_metrics,
     plot_density_and_changes,
-    plot_cross_correlations,
     save_timesteps_video,
 )
 
@@ -60,20 +62,7 @@ METHOD_CONFIGS: list[MethodConfig] = [
 ]
 
 
-# ============================================================================ #
-# System Constants (Pannocchia) — needed for baseline sweep and cost evaluation
-# ============================================================================ #
-
-A = np.array([[-0.1, 0, 0], [0, -2, -6.25], [0, 4, 0]])
-B = np.array([[0.25], [2.0], [0.0]])
-s0 = np.array([1.344, -4.585, 5.674])
-T = 10.0
 N = 1000
-Q = 1.0 * np.eye(3)
-R = 0.1 * np.eye(1)
-u_max = 1.0
-n_s = 3
-n_u = 1
 
 
 # ============================================================================ #
@@ -358,26 +347,6 @@ def plot_density_analysis(method_solutions, colors, results_dir, show=False):
         plt.close(fig)
 
 
-def plot_cross_correlation_analysis(method_solutions, colors, results_dir, show=False):
-    """Plot cross-correlation for all methods (cell 44)."""
-    for key, ms in method_solutions.items():
-        n_m = ms['n']
-        data = extract_trajectory_data(ms, n_m)
-        metrics = compute_trajectory_metrics(data, n_m, T)
-        fig = plot_cross_correlations(data, metrics, key, colors, max_lag=30)
-
-        if results_dir:
-            os.makedirs(results_dir, exist_ok=True)
-            safe_key = key.replace(" ", "_").replace(":", "").replace("(", "").replace(")", "")
-            fig.savefig(
-                os.path.join(results_dir, f"cross_corr_{safe_key}.pdf"),
-                bbox_inches='tight',
-            )
-
-        if not show:
-            plt.close(fig)
-
-
 # ============================================================================ #
 # Timestep Evolution Videos
 # ============================================================================ #
@@ -514,7 +483,6 @@ def main():
         if method_solutions:
             print(f"Analysis: {len(method_solutions)} method variants")
             plot_density_analysis(method_solutions, colors, results_dir, show=args.show)
-            plot_cross_correlation_analysis(method_solutions, colors, results_dir, show=args.show)
 
         # Timestep evolution videos
         if args.save_video:

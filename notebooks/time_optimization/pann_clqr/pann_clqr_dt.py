@@ -24,6 +24,7 @@ from pann_clqr import (
     create_pann_param_clqr,
     create_pann_param_clqr_2,
     create_exact_zoh_cost_clqr,
+    A, B, s0, T, Q, R, u_max, n_s, n_u,
 )
 from utils import (
     RunMode,
@@ -39,20 +40,6 @@ from utils import (
     save_pickle,
     save_dts_distribution,
 )
-
-# ============================================================================ #
-# System Constants (Pannocchia)
-# ============================================================================ #
-
-A = np.array([[-0.1, 0, 0], [0, -2, -6.25], [0, 4, 0]])
-B = np.array([[0.25], [2.0], [0.0]])
-s0 = np.array([1.344, -4.585, 5.674])
-T = 10.0
-Q = 1.0 * np.eye(3)
-R = 0.1 * np.eye(1)
-u_max = 1.0
-n_s = 3
-n_u = 1
 
 ALL_METHODS = ["aux", "rep", "hs_uniform", "hs_substeps", "zoh"]
 

@@ -24,32 +24,35 @@ Instead of uniform timesteps, make $\Delta t_k$ learnable parameters optimized t
 
 ## Analysis Metrics
 - **Sampling density**: $(1/\Delta t_k) \cdot (T/n)$, equals 1 for uniform sampling
-- **Cross-correlation**: Time-lagged correlation between sampling density and $|\Delta u|$, $|\Delta s|$, $|u|$, $|s|$, $t$
-- **Significance bounds**: $\pm 1.96/\sqrt{n}$ for 95% CI (values outside = statistically significant)
 
 ## Directory Structure
 
 Files are organized into example-specific subfolders. `utils.py`, `data/`, and `results/` remain shared at the top level.
 
 ### `pann_clqr/` — Pannocchia CLQR example
-- **`pann_clqr.py`** — QP builders (CVXPY problem definitions + CvxpyLayer wrappers)
+- **`pann_clqr.py`** — QP builders + system constants (A, B, s0, T, Q, R, u_max, n_s, n_u)
 - **`pann_clqr_dt.py`** — Data generation: trains all 6 methods, saves pickles to `data/pann_clqr_dt/`
 - **`plot_pann_clqr_dt.py`** / **`plot_pann_clqr_dt.ipynb`** — Visualization: loads pickles, produces plots in `results/pann_clqr_dt/`
 - **`alt_losses.py`** — Data generation for alternative loss experiments, saves to `data/alt_losses/`
 - **`plot_alt_losses.py`** / **`plot_alt_losses.ipynb`** — Visualization for alternative loss experiments
 
 ### `invpend/` — Inverted pendulum example
-- **`invpend_clqr.py`** — QP builders for linearized cart-pole
+- **`invpend_clqr.py`** — QP builders + system constants (A, B, s0, s_goal, T, Q, R, u_max, x_max, e0, etc.)
 - **`invpend_dt.py`** — Data generation: trains methods/losses, saves to `data/invpend_dt/`
 - **`plot_invpend_dt.py`** / **`plot_invpend_dt.ipynb`** — Visualization: loads pickles, produces plots in `results/invpend_dt/`
 
 ### `stiff_sys/` — Stiff system LTI example
-- **`stiff_sys_clqr.py`** — QP builders for diagonal system with time constants 0.1s, 10s, 100s
+- **`stiff_sys_clqr.py`** — QP builders + system constants (A, B, s0, T, Q, R, u_max, x_max, etc.)
 - **`stiff_sys_dt.py`** — Data generation: trains methods/losses, saves to `data/stiff_sys_dt/`
 - **`plot_stiff_sys_dt.py`** — Visualization: loads pickles, produces plots in `results/stiff_sys_dt/`
 
 ### Shared (top level)
-- **`utils.py`** — Shared utilities (discretization, loss functions, plotting, I/O)
+- **`utils.py`** — Shared utilities (discretization, loss functions, plotting helpers, I/O)
+
+## Code Organization Conventions
+- **System constants** are defined once in the `*_clqr.py` file for each example and imported by training/plotting scripts
+- **Shared helpers** (`euler_matrices`, `save_run_config`, `build_loss_kwargs`, `MethodConfig`, `load_method_results`, `load_loss_results`, `plot_method_results`, `plot_loss_results`, etc.) live in `utils.py`
+- **System-specific plots** (trajectory visualizations, baseline sweeps) stay in each example's plotting script
 - **`data/`** — Pickle files with saved results (subdirs per example)
 - **`results/`** — Generated plots and figures (subdirs per example)
 

@@ -13,6 +13,32 @@ import cvxpy as cp
 from cvxpylayers.torch import CvxpyLayer
 import numpy as np
 
+# ============================================================================ #
+# System Constants (Stiff System LTI)
+# ============================================================================ #
+
+A = np.array([
+    [-10,     0.0,    0.0],
+    [0.0,    -0.1,    0.0],
+    [0.0,     0.0,  -0.01],
+])
+
+B = np.array([
+    [1.0],
+    [1.0],
+    [1.0],
+])
+
+s0 = np.array([-1.0, -1.0, -1.0])
+T = 10.0
+n_default = 40
+Q = 1.0 * np.eye(3)
+R = 0.01 * np.eye(1)
+u_max = 10.0
+x_max = None
+n_s = 3
+n_u = 1
+
 
 def create_stiff_sys_baseline_clqr(n, s0, A, B, Q, R, dt, u_max, x_max):
     """Baseline uniform-timestep constrained LQR with state constraints.

@@ -8,6 +8,20 @@ import cvxpy as cp
 from cvxpylayers.torch import CvxpyLayer
 import numpy as np
 
+# ============================================================================ #
+# System Constants (Pannocchia)
+# ============================================================================ #
+
+A = np.array([[-0.1, 0, 0], [0, -2, -6.25], [0, 4, 0]])
+B = np.array([[0.25], [2.0], [0.0]])
+s0 = np.array([1.344, -4.585, 5.674])
+T = 10.0
+Q = 1.0 * np.eye(3)
+R = 0.1 * np.eye(1)
+u_max = 1.0
+n_s = 3
+n_u = 1
+
 
 def create_pann_clqr(n, s0, A, B, Q, R, dt, u_max=1.0):
     """Baseline uniform-timestep constrained LQR (Euler discretization).
