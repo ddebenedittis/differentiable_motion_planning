@@ -862,6 +862,38 @@ def load_pickle(out_dir, name):
         return pickle.load(f)
 
 
+def load_losses_config(path=None):
+    """Load shared losses config from JSON.
+
+    If path is None, looks for losses_config.json next to utils.py.
+    Returns the parsed dict, or None if the file does not exist.
+    """
+    if path is None:
+        here = os.path.dirname(os.path.abspath(__file__))
+        path = os.path.join(here, "losses_config.json")
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        return json.load(f)
+
+
+def resolve_loss_names(loss_arg, config=None):
+    """Expand '--loss all' using the config's enabled list or LOSS_REGISTRY.
+
+    Args:
+        loss_arg: list from argparse (e.g. ["all"] or ["L_IV", "L_FI"])
+        config: loaded config dict from load_losses_config(), or None
+
+    Returns:
+        list of loss names to run
+    """
+    if "all" in loss_arg:
+        if config is not None and "enabled" in config:
+            return list(config["enabled"])
+        return list(LOSS_REGISTRY.keys())
+    return list(loss_arg)
+
+
 def save_run_config(data_dir, args):
     """Dump CLI args + git hash to run_config.json."""
     config = vars(args).copy()

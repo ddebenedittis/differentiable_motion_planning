@@ -4,11 +4,11 @@
 Loads pickles from data/invpend_dt/ and produces plots in results/invpend_dt/.
 
 Usage:
-    python plot_invpend_dt.py
-    python plot_invpend_dt.py --method rep zoh
-    python plot_invpend_dt.py --analysis-only
-    python plot_invpend_dt.py --show
-    python plot_invpend_dt.py --baseline
+    python invpend_plot.py
+    python invpend_plot.py --method rep zoh
+    python invpend_plot.py --analysis-only
+    python invpend_plot.py --show
+    python invpend_plot.py --baseline
 """
 
 import argparse
@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import matplotlib.pyplot as plt
 import numpy as np
 
-from invpend_clqr import (
+from invpend_prob import (
     create_invpend_baseline_clqr,
     A, B, s0, s_goal, T, Q, R, u_max, v_max, theta_max, x_max, n_s, n_u, e0,
 )
@@ -294,9 +294,9 @@ def main():
     parser.add_argument("--baseline", action="store_true",
                         help="Include baseline sweep plot")
     parser.add_argument(
-        "--reparam", default="both",
+        "--reparam", default="softmax",
         choices=[*REPARAM_CHOICES, "both"],
-        help="Which reparametrization results to plot (default: both)",
+        help="Which reparametrization results to plot (default: softmax)",
     )
 
     args = parser.parse_args()
@@ -317,9 +317,8 @@ def main():
     reparams = list(REPARAM_CHOICES) if args.reparam == "both" else [args.reparam]
 
     for reparam in reparams:
-        suffix = f"_{reparam}" if reparam != "softmax" else ""
-        results_dir = (os.path.join(results_dir_base, reparam)
-                       if reparam != "softmax" else results_dir_base)
+        suffix = f"_{reparam}"
+        results_dir = os.path.join(results_dir_base, reparam)
         os.makedirs(results_dir, exist_ok=True)
 
         print(f"\n{'#' * 50}")

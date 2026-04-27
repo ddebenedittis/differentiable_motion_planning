@@ -1,17 +1,19 @@
 #!/usr/bin/env python
-"""Visualization script for differentiable time optimization experiments.
+"""Visualization script for Pannocchia CLQR differentiable time optimization.
 
 Loads pickles from data/pann_clqr_dt/ and produces plots in results/pann_clqr_dt/.
 
 Usage:
-    python plot_pann_clqr_dt.py
-    python plot_pann_clqr_dt.py --method rep zoh
-    python plot_pann_clqr_dt.py --analysis-only
-    python plot_pann_clqr_dt.py --show
-    python plot_pann_clqr_dt.py --save-video
+    python pann_plot.py
+    python pann_plot.py --method rep zoh
+    python pann_plot.py --loss L_IV L_FI
+    python pann_plot.py --analysis-only
+    python pann_plot.py --show
+    python pann_plot.py --save-video
 """
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -22,20 +24,25 @@ from dataclasses import dataclass
 import matplotlib.pyplot as plt
 import numpy as np
 
-from pann_clqr import (
+from pann_prob import (
     create_pann_clqr,
     A, B, s0, T, Q, R, u_max, n_s, n_u,
 )
 from utils import (
+    LOSS_REGISTRY,
     REPARAM_CHOICES,
     pickle_name,
     load_pickle,
+    load_loss_results,
+    plot_loss_results,
+    plot_loss_comparison,
     evaluate_continuous_cost,
     plot_training_res,
     save_training_res,
     extract_trajectory_data,
     compute_trajectory_metrics,
     plot_density_and_changes,
+    plot_density_analysis_grid,
     save_timesteps_video,
 )
 
@@ -69,11 +76,8 @@ N = 1000
 # Load Results
 # ============================================================================ #
 
-def load_all_results(data_dir, n=160, n_zoh=80, suffix=""):
+def load_method_results(data_dir, n=160, n_zoh=80, suffix=""):
     """Load all available method results from pickle files.
-
-    Args:
-        suffix: pickle name suffix (e.g. "_logsoftmax" for logsoftmax results)
 
     Returns:
         results: dict of {method_name: {sol, history, sol_method, n, internal_methods}}
@@ -107,10 +111,10 @@ def load_all_results(data_dir, n=160, n_zoh=80, suffix=""):
 
 
 # ============================================================================ #
-# Per-Method Plots (cells 14, 19, 25, 31, 33, 37)
+# Per-Method Plots
 # ============================================================================ #
 
-def plot_method_results(name, result, results_dir, show=False):
+def plot_method_results_pann(name, result, results_dir, show=False):
     """Plot training results for a single method (2x3 grid per sub-method)."""
     sol_dict = result["sol"]
     history = result["history"]
@@ -137,7 +141,7 @@ def plot_method_results(name, result, results_dir, show=False):
 
 
 # ============================================================================ #
-# HS Comparison (cell 26)
+# HS Comparison
 # ============================================================================ #
 
 def plot_hs_comparison(result, n, results_dir, show=False):
@@ -195,14 +199,14 @@ def plot_hs_comparison(result, n, results_dir, show=False):
 
 
 # ============================================================================ #
-# Continuous Cost Evaluation (cell 27)
+# Continuous Cost Evaluation
 # ============================================================================ #
 
-def print_continuous_costs(all_results, n):
-    """Evaluate and print true continuous-time costs for all methods."""
+def print_continuous_costs(method_results, loss_results):
+    """Evaluate and print true continuous-time costs for all methods and losses."""
     print("=== True Continuous-Time Cost Comparison ===\n")
 
-    for name, result in all_results.items():
+    for name, result in method_results.items():
         sol_dict = result["sol"]
         history = result["history"]
         n_method = result["n"]
@@ -233,9 +237,36 @@ def print_continuous_costs(all_results, n):
                 print(f"  dt std:   {np.std(dts_final):.5f}")
             print()
 
+    for loss_name, result in loss_results.items():
+        sol = result["sol"]
+        history = result["history"]
+        n = result["n"]
+
+        dts_final = history[-1]['dts']
+        inputs_qp = [sol[n + k].detach().float() for k in range(n)]
+
+        try:
+            true_cost = evaluate_continuous_cost(
+                inputs_qp, dts_final, s0, A, B, Q, R, T,
+            )
+        except Exception as e:
+            print(f"{loss_name}: cost evaluation failed: {e}")
+            continue
+
+        print(f"{loss_name}:")
+        print(f"  Training loss (final):  {history[-1]['loss']:.4f}")
+        print(f"  Loss OCP (final):       {history[-1]['loss_ocp']:.4f}")
+        print(f"  Loss reg (final):       {history[-1]['loss_reg']:.4f}")
+        print(f"  Lambda hat (final):     {history[-1]['lambda_hat']:.4f}")
+        print(f"  True continuous cost:   {true_cost:.4f}")
+        if isinstance(dts_final, np.ndarray):
+            print(f"  dt range: [{np.min(dts_final):.5f}, {np.max(dts_final):.5f}]")
+            print(f"  dt std:   {np.std(dts_final):.5f}")
+        print()
+
 
 # ============================================================================ #
-# Baseline Sweep (cell 8)
+# Baseline Sweep
 # ============================================================================ #
 
 def plot_baseline_sweep(results_dir, show=False):
@@ -285,14 +316,14 @@ def plot_baseline_sweep(results_dir, show=False):
 
 
 # ============================================================================ #
-# Cross-Method Analysis (cells 40, 42, 44)
+# Cross-Method/Loss Analysis
 # ============================================================================ #
 
-def _build_method_solutions(all_results, n):
+def _build_method_solutions(method_results, loss_results, n):
     """Build the method_solutions dict used for density/cross-correlation plots."""
     method_solutions = {}
 
-    # Define the mapping from result keys to display config
+    # Method results
     config = {
         "aux": ("Aux", 1),
         "rep": ("Rep", 2),
@@ -300,7 +331,7 @@ def _build_method_solutions(all_results, n):
         "zoh": ("ZOH", 2),
     }
 
-    for key, result in all_results.items():
+    for key, result in method_results.items():
         prefix, sol_method = config.get(key, (key, 2))
         n_method = result["n"]
         sol_dict = result["sol"]
@@ -315,11 +346,20 @@ def _build_method_solutions(all_results, n):
                 'n': n_method,
             }
 
+    # Loss results
+    for loss_name, result in loss_results.items():
+        method_solutions[loss_name] = {
+            'sol': result['sol'],
+            'history': result['history'],
+            'sol_method': 2,
+            'n': result['n'],
+        }
+
     return method_solutions
 
 
 def plot_density_analysis(method_solutions, colors, results_dir, show=False):
-    """Plot sampling density vs trajectory changes for all methods (cell 42)."""
+    """Plot sampling density vs trajectory changes for all methods."""
     n_methods = len(method_solutions)
     if n_methods == 0:
         return
@@ -348,6 +388,55 @@ def plot_density_analysis(method_solutions, colors, results_dir, show=False):
 
 
 # ============================================================================ #
+# Summary
+# ============================================================================ #
+
+def save_summary(method_results, loss_results, results_dir):
+    """Compute and save metrics summary JSON."""
+    summary = {}
+
+    for loss_name, result in loss_results.items():
+        sol = result["sol"]
+        history = result["history"]
+        n = result["n"]
+
+        dts_final = history[-1]['dts']
+        inputs_qp = [sol[n + k].detach().float() for k in range(n)]
+
+        try:
+            cont_cost = evaluate_continuous_cost(inputs_qp, dts_final, s0, A, B, Q, R, T)
+        except Exception:
+            cont_cost = None
+
+        summary[loss_name] = {
+            "continuous_cost": cont_cost,
+            "final_loss": history[-1]['loss'],
+            "final_loss_ocp": history[-1]['loss_ocp'],
+            "final_loss_reg": history[-1]['loss_reg'],
+            "final_lambda_hat": history[-1]['lambda_hat'],
+        }
+
+    if results_dir:
+        os.makedirs(results_dir, exist_ok=True)
+        with open(os.path.join(results_dir, "summary.json"), "w") as f:
+            json.dump(summary, f, indent=2)
+
+    # Print summary
+    print("\n" + "=" * 60)
+    print("RESULTS SUMMARY")
+    print("=" * 60)
+    for loss_name, metrics in summary.items():
+        print(f"\n{loss_name}:")
+        cost_str = f"{metrics['continuous_cost']:.6f}" if metrics['continuous_cost'] is not None else "N/A"
+        print(f"  Continuous cost:  {cost_str}")
+        print(f"  Final loss (ocp): {metrics['final_loss_ocp']:.6f}")
+        print(f"  Final loss (reg): {metrics['final_loss_reg']:.6f}")
+        print(f"  Final lambda:     {metrics['final_lambda_hat']:.6f}")
+
+    return summary
+
+
+# ============================================================================ #
 # Timestep Evolution Videos
 # ============================================================================ #
 
@@ -361,11 +450,12 @@ _VIDEO_CONFIG = {
 }
 
 
-def _save_all_videos(all_results, data_dir, results_dir, n, n_zoh, suffix=""):
+def _save_all_videos(method_results, loss_results, data_dir, results_dir,
+                     n, n_zoh, suffix=""):
     """Generate timestep evolution videos from saved dts distribution pickles."""
-    for name, result in all_results.items():
+    # Method videos
+    for name, result in method_results.items():
         for method in result["internal_methods"]:
-            # Look up config, with special handling for zoh
             if name == "zoh":
                 dist_pkl = pickle_name("dts_dist_zoh" + suffix, n_zoh, n)
                 video_name = f"zoh_timesteps_n{n_zoh}" if n_zoh != n else "zoh_timesteps"
@@ -385,6 +475,17 @@ def _save_all_videos(all_results, data_dir, results_dir, n, n_zoh, suffix=""):
             print(f"  Video: {video_name}")
             save_timesteps_video(results_dir, video_name, dts_all=dts_all)
 
+    # Loss videos
+    for loss_name in loss_results:
+        try:
+            dts_dist = load_pickle(data_dir, f"dts_dist_{loss_name}{suffix}")
+        except (FileNotFoundError, OSError):
+            print(f"  No dts distribution for {loss_name}, skipping video")
+            continue
+
+        print(f"  Video: {loss_name}")
+        save_timesteps_video(results_dir, f"{loss_name}_timesteps", dts_all=dts_dist)
+
 
 # ============================================================================ #
 # Main
@@ -392,7 +493,7 @@ def _save_all_videos(all_results, data_dir, results_dir, n, n_zoh, suffix=""):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Visualization for differentiable time optimization experiments.",
+        description="Visualization for Pannocchia CLQR time optimization.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
@@ -407,16 +508,26 @@ def main():
         "--method", nargs="+", default=None,
         help="Which methods to plot (default: all available)",
     )
-    parser.add_argument("--analysis-only", action="store_true", help="Only cross-method analysis plots")
-    parser.add_argument("--n", type=int, default=160, help="Timestep count for pickle naming")
-    parser.add_argument("--n-zoh", type=int, default=80, help="ZOH timestep count")
-    parser.add_argument("--show", action="store_true", help="Display plots interactively")
-    parser.add_argument("--baseline", action="store_true", help="Include baseline sweep plot")
-    parser.add_argument("--save-video", action="store_true", help="Save timestep evolution videos")
     parser.add_argument(
-        "--reparam", default="both",
+        "--loss", nargs="+", default=None,
+        help="Which losses to plot (default: all available)",
+    )
+    parser.add_argument("--analysis-only", action="store_true",
+                        help="Only cross-method/loss analysis plots")
+    parser.add_argument("--n", type=int, default=160,
+                        help="Timestep count for pickle naming")
+    parser.add_argument("--n-zoh", type=int, default=80,
+                        help="ZOH timestep count")
+    parser.add_argument("--show", action="store_true",
+                        help="Display plots interactively")
+    parser.add_argument("--baseline", action="store_true",
+                        help="Include baseline sweep plot")
+    parser.add_argument("--save-video", action="store_true",
+                        help="Save timestep evolution videos")
+    parser.add_argument(
+        "--reparam", default="softmax",
         choices=[*REPARAM_CHOICES, "both"],
-        help="Which reparametrization results to plot (default: both)",
+        help="Which reparametrization results to plot (default: softmax)",
     )
 
     args = parser.parse_args()
@@ -436,59 +547,79 @@ def main():
     reparams = list(REPARAM_CHOICES) if args.reparam == "both" else [args.reparam]
 
     for reparam in reparams:
-        suffix = f"_{reparam}" if reparam != "softmax" else ""
-        results_dir = (os.path.join(results_dir_base, reparam)
-                       if reparam != "softmax" else results_dir_base)
+        suffix = f"_{reparam}"
+        results_dir = os.path.join(results_dir_base, reparam)
         os.makedirs(results_dir, exist_ok=True)
 
         print(f"\n{'#' * 50}")
         print(f"# Reparametrization: {reparam}")
         print(f"{'#' * 50}")
         print(f"Loading data from: {data_dir}")
-        all_results = load_all_results(data_dir, n=args.n, n_zoh=args.n_zoh,
-                                       suffix=suffix)
-
-        if not all_results:
-            print(f"No {reparam} results found. Skipping.")
-            continue
+        method_results = load_method_results(data_dir, n=args.n, n_zoh=args.n_zoh,
+                                             suffix=suffix)
+        loss_results = load_loss_results(data_dir, loss_names=args.loss,
+                                         suffix=suffix)
 
         # Filter methods if requested
         if args.method:
-            all_results = {k: v for k, v in all_results.items() if k in args.method}
+            method_results = {k: v for k, v in method_results.items()
+                              if k in args.method}
 
-        loaded = list(all_results.keys())
-        print(f"Loaded methods: {loaded}")
+        if not method_results and not loss_results:
+            print(f"No {reparam} results found. Skipping.")
+            continue
+
+        loaded_methods = list(method_results.keys())
+        loaded_losses = list(loss_results.keys())
+        print(f"Loaded methods: {loaded_methods}")
+        print(f"Loaded losses: {loaded_losses}")
 
         if not args.analysis_only:
             # Per-method plots
-            for name, result in all_results.items():
+            for name, result in method_results.items():
                 print(f"Plotting {name}...")
-                plot_method_results(name, result, results_dir, show=args.show)
+                plot_method_results_pann(name, result, results_dir, show=args.show)
 
             # HS comparison
-            if "hs" in all_results:
+            if "hs" in method_results:
                 print("Plotting HS comparison...")
-                plot_hs_comparison(all_results["hs"], args.n, results_dir, show=args.show)
+                plot_hs_comparison(method_results["hs"], args.n, results_dir,
+                                   show=args.show)
+
+            # Per-loss plots
+            for loss_name, result in loss_results.items():
+                print(f"Plotting {loss_name}...")
+                plot_loss_results(loss_name, result, results_dir, show=args.show)
+
+            # Loss comparison
+            if loss_results:
+                plot_loss_comparison(loss_results, results_dir, show=args.show)
 
             # Continuous costs
-            print_continuous_costs(all_results, args.n)
+            print_continuous_costs(method_results, loss_results)
 
             # Baseline sweep
             if args.baseline:
                 print("Running baseline sweep...")
                 plot_baseline_sweep(results_dir, show=args.show)
 
-        # Cross-method analysis
-        method_solutions = _build_method_solutions(all_results, args.n)
+        # Cross-method/loss analysis
+        method_solutions = _build_method_solutions(method_results, loss_results,
+                                                   args.n)
         if method_solutions:
-            print(f"Analysis: {len(method_solutions)} method variants")
-            plot_density_analysis(method_solutions, colors, results_dir, show=args.show)
+            print(f"Analysis: {len(method_solutions)} variants")
+            plot_density_analysis(method_solutions, colors, results_dir,
+                                 show=args.show)
+
+        # Summary
+        if loss_results:
+            save_summary(method_results, loss_results, results_dir)
 
         # Timestep evolution videos
         if args.save_video:
             print("Saving timestep evolution videos...")
-            _save_all_videos(all_results, data_dir, results_dir, args.n, args.n_zoh,
-                             suffix=suffix)
+            _save_all_videos(method_results, loss_results, data_dir, results_dir,
+                             args.n, args.n_zoh, suffix=suffix)
 
         print(f"\nPlots saved to: {results_dir}")
 

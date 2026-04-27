@@ -1,0 +1,14 @@
+{
+  "enabled": [
+    "L_IV",
+    "L_FI",
+    "L_PWLH",
+    "L_SSD"
+  ],
+  "per_loss": {
+    "L_IV":   {"lambda0": 0.3},
+    "L_FI":   {"lambda0": 0.5},
+    "L_PWLH": {"lambda0": 0.3},
+    "L_SSD":  {"lambda0": 0.1}
+  }
+}

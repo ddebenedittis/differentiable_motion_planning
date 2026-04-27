@@ -10,11 +10,11 @@ This is an equidistribution problem. You want each interval to carry equal "acti
 
   Penalize deviations from equidistribution:
 
-  $$L = \sum_k \left( \Delta t_k \cdot |\dot{u}_k| ;-; \bar{m} \right)^2, \qquad \bar{m} = \frac{1}{n}\sum_j \Delta t_j \cdot |\dot{u}_j|$$
+  $$L = \sum_k \left( \Delta t_k \cdot |\dot{u}_k| \; - \; \bar{m} \right)^2, \qquad \bar{m} = \frac{1}{n}\sum_j \Delta t_j \cdot |\dot{u}_j|$$
 
-  In discrete terms, $\dot{u}k \approx \frac{u{k+1} - u_k}{\Delta t_k}$, so $\Delta t_k \cdot |\dot{u}_k| \approx |\Delta u_k|$, and the loss becomes:
+  In discrete terms, $\dot{u}_k \approx \frac{u_{k+1} - u_k}{\Delta t_k}$, so $\Delta t_k \cdot |\dot{u}_k| \approx |\Delta u_k|$, and the loss becomes:
 
-  $$L = \operatorname{Var}!\bigl(|\Delta u_k|\bigr) = \sum_k \left( |\Delta u_k| - \overline{|\Delta u|} \right)^2$$
+  $$L = \mathrm{Var}\!\bigl(|\Delta u_k|\bigr) = \sum_k \left( |\Delta u_k| - \overline{|\Delta u|} \right)^2$$
 
   This looks like it doesn't involve $\Delta t_k$ explicitly, but the gradients flow through the OCP solution ($u_k$ depends on the discretization).
 

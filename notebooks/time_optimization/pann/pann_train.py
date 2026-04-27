@@ -1,13 +1,14 @@
 #!/usr/bin/env python
-"""Data generation script for differentiable time optimization experiments.
+"""Data generation script for Pannocchia CLQR differentiable time optimization.
 
-Trains 5 optimization methods (aux, rep, hs_uniform, hs_substeps, zoh)
-for learning non-uniform timesteps in constrained LQR problems.
+Trains methods (aux, rep, hs_uniform, hs_substeps, zoh) and alternative loss
+functions for learning non-uniform timesteps in constrained LQR problems.
 
 Usage:
-    python pann_clqr_dt.py --mode full --method rep zoh
-    python pann_clqr_dt.py --mode test --method all
-    python pann_clqr_dt.py --mode full --method zoh --n 80 --epochs 500
+    python pann_train.py --mode test --experiment all
+    python pann_train.py --mode full --experiment methods --method rep zoh
+    python pann_train.py --mode full --experiment losses --loss L_IV L_FI
+    python pann_train.py --mode full --experiment methods --method zoh --n 80 --epochs 500
 """
 
 import argparse
@@ -20,25 +21,32 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from pann_clqr import (
+from pann_prob import (
     create_pann_param_clqr,
     create_pann_param_clqr_2,
     create_exact_zoh_cost_clqr,
     A, B, s0, T, Q, R, u_max, n_s, n_u,
 )
 from utils import (
-    RunMode,
-    get_n_epochs,
-    pickle_name,
-    get_reparam_fn,
+    LOSS_REGISTRY,
     REPARAM_CHOICES,
+    AdaptiveGradientBalancer,
+    RunMode,
+    build_loss_kwargs,
+    euler_matrices,
+    get_n_epochs,
+    get_reparam_fn,
+    load_losses_config,
+    pickle_name,
+    resolve_loss_names,
     Ad_Bd_from_dt,
     zoh_cost_matrices,
     task_loss,
     uniform_resampling_loss,
     substep_loss,
-    save_pickle,
     save_dts_distribution,
+    save_pickle,
+    save_run_config,
 )
 
 ALL_METHODS = ["aux", "rep", "hs_uniform", "hs_substeps", "zoh"]
@@ -51,6 +59,8 @@ DEFAULT_LR = {
     "aux": 5e-4, "rep": 1e-2, "hs_uniform": 1e-2, "hs_substeps": 1e-2,
     "zoh": 1e-2,
 }
+
+DISC_CHOICES = ("foe", "zoh")
 
 
 # ============================================================================ #
@@ -315,10 +325,9 @@ def train_softmax_method(method_name, n, n_epochs, lr, data_dir, n_default=160,
     sol_name, hist_name, dist_name = _pickle_names(method_name, n, n_default)
 
     # Add suffix for non-default reparametrization
-    if reparam != "softmax":
-        sol_name += f"_{reparam}"
-        hist_name += f"_{reparam}"
-        dist_name += f"_{reparam}"
+    sol_name += f"_{reparam}"
+    hist_name += f"_{reparam}"
+    dist_name += f"_{reparam}"
 
     # For hs methods, we need to handle shared pickle files
     if method_name in ("hs_uniform", "hs_substeps"):
@@ -345,42 +354,175 @@ def train_softmax_method(method_name, n, n_epochs, lr, data_dir, n_default=160,
 
 
 # ============================================================================ #
+# Alternative Loss Training
+# ============================================================================ #
+
+def train_one_loss(loss_name, n, n_epochs, lr, lambda0, use_balancing, data_dir,
+                   disc="foe", reparam="softmax"):
+    """ZOH3 training loop with one alternative loss as regularizer.
+
+    Returns:
+        sol: list of torch tensors (QP solution)
+        history: list of dicts with training metrics
+    """
+    theta_2_dt = get_reparam_fn(reparam)
+
+    # Use float64 to match cvxpylayers output dtype
+    dtype = torch.float64
+    A_t = torch.tensor(A, dtype=dtype)
+    B_t = torch.tensor(B, dtype=dtype)
+    Q_t = torch.tensor(Q, dtype=dtype)
+    R_t = torch.tensor(R, dtype=dtype)
+    s0_t = torch.tensor(s0, dtype=dtype)
+
+    theta = torch.nn.Parameter(torch.ones(n, 1, dtype=dtype))
+    optim = torch.optim.Adam([theta], lr=lr)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optim, T_max=n_epochs, eta_min=lr * 0.01)
+
+    _, layer, _, _, _, _, _, _ = create_exact_zoh_cost_clqr(n, s0, n_s, n_u, u_max)
+
+    balancer = AdaptiveGradientBalancer(lambda_0=lambda0) if use_balancing else None
+    loss_fn = LOSS_REGISTRY[loss_name]
+
+    history = []
+    sol = None
+
+    with tqdm(total=n_epochs, desc=loss_name) as pbar:
+        for epoch in range(n_epochs):
+            pbar.update(1)
+            optim.zero_grad(set_to_none=True)
+
+            dts_torch = theta_2_dt(theta, T, n)
+
+            # Compute discretization parameters (ZOH or FOE)
+            compute_matrices = zoh_cost_matrices if disc == "zoh" else euler_matrices
+            Ad_list, Bd_list, Lx_list, Lu_list, W_list = [], [], [], [], []
+            for k in range(n):
+                Ad_k, Bd_k, W_k = compute_matrices(dts_torch[k], A_t, B_t, Q_t, R_t)
+                Ad_list.append(Ad_k)
+                Bd_list.append(Bd_k)
+                W_list.append(W_k)
+
+                L_k = torch.linalg.cholesky(W_k)
+                LT_k = L_k.T
+                Lx_list.append(LT_k[:, :n_s])
+                Lu_list.append(LT_k[:, n_s:])
+
+            # Solve QP
+            sol = layer(*Ad_list, *Bd_list, *Lx_list, *Lu_list)
+
+            # Extract states and inputs
+            states = [s0_t] + [sol[k] for k in range(n)]
+            inputs = [sol[n + k] for k in range(n)]
+
+            # L_ocp: exact integrated cost
+            loss_ocp = torch.tensor(0.0, dtype=dtype)
+            for k in range(n):
+                z_k = torch.cat([states[k], inputs[k]])
+                loss_ocp = loss_ocp + z_k @ W_list[k] @ z_k
+
+            # L_reg: alternative loss
+            kwargs = build_loss_kwargs(
+                loss_name, states, inputs, dts_torch, W_list, Ad_list, Bd_list,
+                A_t, B_t, Q_t, R_t, T=T, u_max=u_max,
+            )
+            loss_reg = loss_fn(**kwargs)
+
+            # Combine losses
+            if balancer is not None:
+                lambda_hat = balancer.step(theta, loss_ocp, loss_reg)
+            else:
+                lambda_hat = lambda0
+
+            loss = loss_ocp + lambda_hat * loss_reg
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_([theta], max_norm=1.0)
+            optim.step()
+            scheduler.step()
+
+            history.append({
+                "epoch": epoch,
+                "loss": float(loss.item()),
+                "loss_ocp": float(loss_ocp.item()),
+                "loss_reg": float(loss_reg.item()),
+                "lambda_hat": float(lambda_hat) if isinstance(lambda_hat, float) else float(lambda_hat),
+                "dts": dts_torch.detach().cpu().numpy(),
+            })
+
+            pbar.set_postfix(
+                loss=f"{loss.item():.4f}",
+                ocp=f"{loss_ocp.item():.4f}",
+                reg=f"{loss_reg.item():.4f}",
+                lam=f"{lambda_hat:.4f}" if isinstance(lambda_hat, float) else f"{lambda_hat:.4f}",
+            )
+
+    # Save results
+    suffix = f"_{reparam}"
+    save_pickle(data_dir, f"sol_{loss_name}{suffix}", sol)
+    save_pickle(data_dir, f"history_{loss_name}{suffix}", history)
+    save_dts_distribution(data_dir, f"dts_dist_{loss_name}{suffix}", history)
+
+    print(f"  Final loss: {history[-1]['loss']:.6f}")
+    return sol, history
+
+
+# ============================================================================ #
 # Main
 # ============================================================================ #
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Data generation for differentiable time optimization experiments.",
+        description="Data generation for Pannocchia CLQR differentiable time optimization.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--mode", required=True, choices=["test", "full"],
-        help="Run mode: test (5 epochs) or full (default epochs per method)",
+        help="Run mode: test (5 epochs) or full (default epochs per method/loss)",
     )
     parser.add_argument(
-        "--method", nargs="+", required=True,
+        "--experiment", required=True, choices=["methods", "losses", "all"],
+        help="Which experiments to run",
+    )
+    parser.add_argument(
+        "--method", nargs="+", default=["all"],
         help=f"Method(s) to train, or 'all'. Available: {ALL_METHODS}",
+    )
+    parser.add_argument(
+        "--loss", nargs="+", default=["default"],
+        help="Loss function(s) to train. Use 'default' (the config's "
+             "enabled list) or 'all' (every loss in LOSS_REGISTRY). "
+             "Available: " + str(list(LOSS_REGISTRY.keys())),
     )
     parser.add_argument("--n", type=int, default=None, help="Override timestep count")
     parser.add_argument("--epochs", type=int, default=None, help="Override epoch count")
     parser.add_argument("--lr", type=float, default=None, help="Override learning rate")
+    parser.add_argument("--lambda0", type=float, default=0.3,
+                        help="Base regularizer weight (default: 0.3)")
+    parser.add_argument("--no-balancing", action="store_true",
+                        help="Use fixed lambda0 instead of adaptive")
+    parser.add_argument(
+        "--disc", choices=DISC_CHOICES, default="foe",
+        help="Discretization method for losses: zoh or foe (forward Euler, default)",
+    )
     parser.add_argument(
         "--data-dir", default=None,
         help="Pickle output directory (default: data/pann_clqr_dt)",
     )
     parser.add_argument(
-        "--reparam", default="both",
+        "--reparam", default="softmax",
         choices=[*REPARAM_CHOICES, "both"],
-        help="Reparametrization: softmax, logsoftmax, or both (default: both)",
+        help="Reparametrization: softmax, logsoftmax, or both (default: softmax)",
     )
+    parser.add_argument(
+        "--config", default=None, metavar="PATH",
+        help="Path to losses_config.json (default: time_optimization/losses_config.json). "
+             "Controls which losses run when --loss default is used.",
+    )
+
     args = parser.parse_args()
 
-    methods = ALL_METHODS if "all" in args.method else args.method
-    for m in methods:
-        if m not in ALL_METHODS:
-            parser.error(f"Unknown method: {m}. Available: {ALL_METHODS}")
-
     run_mode = RunMode.TEST if args.mode == "test" else RunMode.FULL
+    losses_cfg = load_losses_config(args.config)
 
     script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     data_dir = args.data_dir or os.path.join(script_dir, "data", "pann_clqr_dt")
@@ -391,33 +533,72 @@ def main():
 
     reparams = list(REPARAM_CHOICES) if args.reparam == "both" else [args.reparam]
 
+    save_run_config(data_dir, args)
+
     print(f"Output directory: {data_dir}")
-    print(f"Methods: {methods}")
     print(f"Reparametrizations: {reparams}")
     print(f"Mode: {args.mode}")
     print()
 
-    for reparam in reparams:
-        for method_name in methods:
-            n = args.n or DEFAULT_N[method_name]
-            lr = args.lr or DEFAULT_LR[method_name]
-            method_key = "aux" if method_name == "aux" else method_name
-            # Map hs methods to the "hs" key for epoch lookup
-            epoch_key = method_name
-            if method_name in ("hs_uniform", "hs_substeps"):
-                epoch_key = "hs"
-            n_epochs = args.epochs or get_n_epochs(run_mode, epoch_key)
+    # Methods training
+    if args.experiment in ("methods", "all"):
+        methods = ALL_METHODS if "all" in args.method else args.method
+        for m in methods:
+            if m not in ALL_METHODS:
+                parser.error(f"Unknown method: {m}. Available: {ALL_METHODS}")
 
-            print(f"\n{'=' * 40}")
-            print(f"Training {method_name} [{reparam}] (n={n}, epochs={n_epochs}, lr={lr})")
-            print(f"{'=' * 40}")
+        print(f"Methods: {methods}")
+        for reparam in reparams:
+            for method_name in methods:
+                n = args.n or DEFAULT_N[method_name]
+                lr = args.lr or DEFAULT_LR[method_name]
+                epoch_key = method_name
+                if method_name in ("hs_uniform", "hs_substeps"):
+                    epoch_key = "hs"
+                n_epochs = args.epochs or get_n_epochs(run_mode, epoch_key)
 
-            if method_name == "aux":
-                train_aux(n, n_epochs, lr, data_dir)
-            else:
-                train_softmax_method(
-                    method_name, n, n_epochs, lr, data_dir,
-                    n_default=n_default, reparam=reparam,
+                print(f"\n{'=' * 40}")
+                print(f"Training {method_name} [{reparam}] (n={n}, epochs={n_epochs}, lr={lr})")
+                print(f"{'=' * 40}")
+
+                if method_name == "aux":
+                    train_aux(n, n_epochs, lr, data_dir)
+                else:
+                    train_softmax_method(
+                        method_name, n, n_epochs, lr, data_dir,
+                        n_default=n_default, reparam=reparam,
+                    )
+
+    # Alt losses training
+    if args.experiment in ("losses", "all"):
+        loss_names = resolve_loss_names(args.loss, losses_cfg)
+        for name in loss_names:
+            if name not in LOSS_REGISTRY:
+                parser.error(
+                    f"Unknown loss: {name}. "
+                    f"Available: {list(LOSS_REGISTRY.keys())}")
+
+        n_loss = args.n or 160
+        lr_loss = args.lr or 3e-2
+        per_loss_cfg = losses_cfg.get("per_loss", {}) if losses_cfg else {}
+        print(f"\nLosses: {loss_names}")
+        print(f"Balancing: "
+              f"{'adaptive' if not args.no_balancing else 'fixed'}, "
+              f"lambda0={args.lambda0}, disc={args.disc}")
+
+        for reparam in reparams:
+            for loss_name in loss_names:
+                n_epochs = args.epochs or get_n_epochs(run_mode, loss_name)
+                lambda0 = per_loss_cfg.get(loss_name, {}).get("lambda0", args.lambda0)
+
+                print(f"\n{'=' * 40}")
+                print(f"Training {loss_name} [{reparam}] ({n_epochs} epochs, lambda0={lambda0})")
+                print(f"{'=' * 40}")
+
+                train_one_loss(
+                    loss_name, n_loss, n_epochs, lr_loss, lambda0,
+                    not args.no_balancing, data_dir, disc=args.disc,
+                    reparam=reparam,
                 )
 
     print(f"\nResults saved to: {data_dir}")

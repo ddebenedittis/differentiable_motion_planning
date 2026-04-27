@@ -29,92 +29,59 @@ Instead of uniform timesteps, make $\Delta t_k$ learnable parameters optimized t
 
 Files are organized into example-specific subfolders. `utils.py`, `data/`, and `results/` remain shared at the top level.
 
-### `pann_clqr/` — Pannocchia CLQR example
-- **`pann_clqr.py`** — QP builders + system constants (A, B, s0, T, Q, R, u_max, n_s, n_u)
-- **`pann_clqr_dt.py`** — Data generation: trains all 6 methods, saves pickles to `data/pann_clqr_dt/`
-- **`plot_pann_clqr_dt.py`** / **`plot_pann_clqr_dt.ipynb`** — Visualization: loads pickles, produces plots in `results/pann_clqr_dt/`
-- **`alt_losses.py`** — Data generation for alternative loss experiments, saves to `data/alt_losses/`
-- **`plot_alt_losses.py`** / **`plot_alt_losses.ipynb`** — Visualization for alternative loss experiments
+### File Naming Convention
 
-### `invpend/` — Inverted pendulum example
-- **`invpend_clqr.py`** — QP builders + system constants (A, B, s0, s_goal, T, Q, R, u_max, x_max, e0, etc.)
-- **`invpend_dt.py`** — Data generation: trains methods/losses, saves to `data/invpend_dt/`
-- **`plot_invpend_dt.py`** / **`plot_invpend_dt.ipynb`** — Visualization: loads pickles, produces plots in `results/invpend_dt/`
+Each example `<exp>` lives in its own subfolder and contains three standard scripts:
 
-### `stiff_sys/` — Stiff system LTI example
-- **`stiff_sys_clqr.py`** — QP builders + system constants (A, B, s0, T, Q, R, u_max, x_max, etc.)
-- **`stiff_sys_dt.py`** — Data generation: trains methods/losses, saves to `data/stiff_sys_dt/`
-- **`plot_stiff_sys_dt.py`** — Visualization: loads pickles, produces plots in `results/stiff_sys_dt/`
+| File | Role |
+|------|------|
+| `<exp>_prob.py` | QP builders + system constants (A, B, s0, T, Q, R, ...) |
+| `<exp>_train.py` | Data generation: trains methods/losses, saves pickles to `data/` |
+| `<exp>_plot.py` (+ `.ipynb`) | Visualization: loads pickles, produces plots in `results/` |
+
+System constants are defined once in `*_prob.py` and imported by training/plotting scripts.
+
+### Examples
+
+- **`pann/`** — Pannocchia CLQR (3 states, 1 input)
+- **`invpend/`** — Inverted pendulum (linearized cart-pole, error coordinates)
+- **`stiff_sys/`** — Stiff system LTI (well-separated time constants: 0.1s, 10s, 100s)
 
 ### Shared (top level)
 - **`utils.py`** — Shared utilities (discretization, loss functions, plotting helpers, I/O)
-
-## Code Organization Conventions
-- **System constants** are defined once in the `*_clqr.py` file for each example and imported by training/plotting scripts
-- **Shared helpers** (`euler_matrices`, `save_run_config`, `build_loss_kwargs`, `MethodConfig`, `load_method_results`, `load_loss_results`, `plot_method_results`, `plot_loss_results`, etc.) live in `utils.py`
-- **System-specific plots** (trajectory visualizations, baseline sweeps) stay in each example's plotting script
+- **`losses_config.json`** — Shared config controlling which aux losses run and their `lambda0` (see below)
 - **`data/`** — Pickle files with saved results (subdirs per example)
 - **`results/`** — Generated plots and figures (subdirs per example)
 
+### Losses Config (`losses_config.json`)
+
+Controls which aux losses run across **all** scenarios when `--loss all` is passed.
+Edit this one file to add/remove losses globally.
+
+```json
+{
+  "enabled": ["L_IV", "L_FI", "L_PWLH", "L_SSD"],
+  "per_loss": {
+    "L_IV":   {"lambda0": 0.3},
+    "L_FI":   {"lambda0": 0.5}
+  }
+}
+```
+
+- `enabled` — the set of losses run when `--loss all` is used (replaces the full `LOSS_REGISTRY` default)
+- `per_loss` — optional per-loss `lambda0` override (falls back to `--lambda0` CLI arg)
+- `--loss L_IV L_FI` always overrides the config (explicit list ignores `enabled`)
+- `--config PATH` points to a custom config file
+
 ### Script Usage
 ```bash
-# --- pann_clqr example ---
-# Train all methods (5 test epochs)
-python pann_clqr/pann_clqr_dt.py --mode test --method all
-
-# Train specific methods (full run)
-python pann_clqr/pann_clqr_dt.py --mode full --method rep zoh
-
-# Generate all plots from saved data
-python pann_clqr/plot_pann_clqr_dt.py
-
-# Only cross-method analysis plots
-python pann_clqr/plot_pann_clqr_dt.py --analysis-only
-
-# Include baseline sweep
-python pann_clqr/plot_pann_clqr_dt.py --baseline
-
-# Alternative losses: train specific losses (test)
-python pann_clqr/alt_losses.py --mode test --loss L_IV L_FI
-
-# Alternative losses: train all (full run)
-python pann_clqr/alt_losses.py --mode full --loss all
-
-# Alternative losses: generate plots
-python pann_clqr/plot_alt_losses.py
-
-# Alternative losses: only analysis plots
-python pann_clqr/plot_alt_losses.py --analysis-only
-
-# --- invpend example ---
-# Train all experiments (test)
-python invpend/invpend_dt.py --mode test --experiment all
-
-# Train specific method (full run)
-python invpend/invpend_dt.py --mode full --experiment methods --method rep
-
-# Generate all plots
-python invpend/plot_invpend_dt.py
-
-# --- stiff_sys example ---
-# Train all experiments (test)
-python stiff_sys/stiff_sys_dt.py --mode test --experiment all
-
-# Train specific method (full run)
-python stiff_sys/stiff_sys_dt.py --mode full --experiment methods --method rep
-
-# Train specific losses (full run)
-python stiff_sys/stiff_sys_dt.py --mode full --experiment losses --loss L_IV L_FI
-
-# Generate all plots
-python stiff_sys/plot_stiff_sys_dt.py
-
-# Plot specific methods/losses
-python stiff_sys/plot_stiff_sys_dt.py --method rep --loss L_IV L_FI
-
-# Only cross-method analysis plots
-python stiff_sys/plot_stiff_sys_dt.py --analysis-only
-
-# Include baseline sweep
-python stiff_sys/plot_stiff_sys_dt.py --baseline
+# Generic pattern (replace <dir>/<exp> with e.g. pann/pann, invpend/invpend, stiff_sys/stiff_sys):
+python <dir>/<exp>_train.py --mode test --experiment all
+python <dir>/<exp>_train.py --mode full --experiment methods --method rep
+python <dir>/<exp>_train.py --mode full --experiment losses --loss L_IV L_FI
+python <dir>/<exp>_train.py --mode full --experiment losses  # uses losses_config.json
+python <dir>/<exp>_plot.py
+python <dir>/<exp>_plot.py --method rep --loss L_IV L_FI
+python <dir>/<exp>_plot.py --analysis-only
+python <dir>/<exp>_plot.py --baseline
 ```
