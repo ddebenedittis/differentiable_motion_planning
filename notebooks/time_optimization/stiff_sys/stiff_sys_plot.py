@@ -27,7 +27,6 @@ from stiff_sys_prob import (
 )
 from utils import (
     LOSS_REGISTRY,
-    REPARAM_CHOICES,
     MethodConfig,
     load_method_results,
     load_loss_results,
@@ -292,18 +291,13 @@ def main():
                         help="Display plots interactively")
     parser.add_argument("--baseline", action="store_true",
                         help="Include baseline sweep plot")
-    parser.add_argument(
-        "--reparam", default="softmax",
-        choices=[*REPARAM_CHOICES, "both"],
-        help="Which reparametrization results to plot (default: softmax)",
-    )
 
     args = parser.parse_args()
 
     script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     data_dir = args.data_dir or os.path.join(script_dir, "data", "stiff_sys_dt")
-    results_dir_base = (args.results_dir
-                        or os.path.join(script_dir, "results", "stiff_sys_dt"))
+    results_dir = (args.results_dir
+                   or os.path.join(script_dir, "results", "stiff_sys_dt"))
 
     try:
         from dimp.utils import init_matplotlib, get_colors
@@ -313,135 +307,126 @@ def main():
         colors = ['#0072B2', '#E69F00', '#009E73', '#CC79A7', '#F0E442',
                   '#D55E00']
 
-    reparams = list(REPARAM_CHOICES) if args.reparam == "both" else [args.reparam]
+    os.makedirs(results_dir, exist_ok=True)
 
-    for reparam in reparams:
-        suffix = f"_{reparam}"
-        results_dir = os.path.join(results_dir_base, reparam)
-        os.makedirs(results_dir, exist_ok=True)
+    print(f"Loading data from: {data_dir}")
+    method_results = load_method_results(data_dir, METHOD_CONFIGS)
+    loss_results = load_loss_results(data_dir,
+                                     loss_names=args.loss or "all")
 
-        print(f"\n{'#' * 50}")
-        print(f"# Reparametrization: {reparam}")
-        print(f"{'#' * 50}")
-        print(f"Loading data from: {data_dir}")
-        method_results = load_method_results(data_dir, METHOD_CONFIGS, suffix=suffix)
-        loss_results = load_loss_results(data_dir,
-                                         loss_names=args.loss or "all",
-                                         suffix=suffix)
+    # Filter methods if requested
+    if args.method:
+        method_results = {k: v for k, v in method_results.items()
+                          if k in args.method}
 
-        # Filter methods if requested
-        if args.method:
-            method_results = {k: v for k, v in method_results.items()
-                              if k in args.method}
+    if not method_results and not loss_results:
+        print("No results found.")
+        return
 
-        if not method_results and not loss_results:
-            print(f"No {reparam} results found. Skipping.")
-            continue
+    loaded_methods = list(method_results.keys())
+    loaded_losses = list(loss_results.keys())
+    print(f"Loaded methods: {loaded_methods}")
+    print(f"Loaded losses: {loaded_losses}")
 
-        loaded_methods = list(method_results.keys())
-        loaded_losses = list(loss_results.keys())
-        print(f"Loaded methods: {loaded_methods}")
-        print(f"Loaded losses: {loaded_losses}")
+    if not args.analysis_only:
+        # Per-method plots
+        for name, result in method_results.items():
+            print(f"Plotting {name}...")
+            plot_method_results(name, result, results_dir,
+                                show=args.show)
 
-        if not args.analysis_only:
-            # Per-method plots
-            for name, result in method_results.items():
-                print(f"Plotting {name}...")
-                plot_method_results(name, result, results_dir,
-                                    show=args.show)
-
-                # Stiff-system-specific trajectory plot
-                for method in result["internal_methods"]:
-                    sol = result["sol"][method]
-                    hist_m = [h for h in result["history"]
-                              if h['method'] == method]
-                    if hist_m:
-                        dts_final = np.array(hist_m[-1]['dts']).flatten()
-                        plot_stiff_sys_trajectory(
-                            dts_final, result["n"], sol=sol,
-                            title=f"{name}: {method}",
-                            results_dir=results_dir,
-                            filename=f"trajectory_{name}_{method}",
-                            show=args.show,
-                        )
-
-            # Uniform-timestep baseline trajectory
-            if method_results:
-                n_uniform = next(iter(method_results.values()))["n"]
-            elif loss_results:
-                n_uniform = next(iter(loss_results.values()))["n"]
-            else:
-                n_uniform = 40
-            dt_uniform = T / n_uniform
-            try:
-                prob, s_base, u_base = create_stiff_sys_baseline_clqr(
-                    n_uniform, s0, A, B, Q, R, dt_uniform, u_max, x_max,
-                )
-                prob.solve()
-                if prob.status in ("optimal", "optimal_inaccurate"):
-                    print(f"--- Uniform: OCP cost ---")
-                    print(f"  n={n_uniform}, cost={prob.objective.value:.6f}")
-                    dts_uniform = np.full(n_uniform, dt_uniform)
-                    s_base_arr = np.vstack(
-                        [s0] + [s_base[i + 1].value.flatten()
-                                for i in range(n_uniform)])
-                    u_base_arr = np.array([u_base[i].value.flatten()
-                                           for i in range(n_uniform)])
+            # Stiff-system-specific trajectory plot
+            for method in result["internal_methods"]:
+                sol = result["sol"][method]
+                hist_m = [h for h in result["history"]
+                          if h['method'] == method]
+                if hist_m:
+                    dts_final = np.array(hist_m[-1]['dts']).flatten()
                     plot_stiff_sys_trajectory(
-                        dts_uniform, n_uniform,
-                        s_arr=s_base_arr, u_arr=u_base_arr,
-                        title=(f"Uniform baseline (n={n_uniform}, "
-                               f"cost={prob.objective.value:.4f})"),
+                        dts_final, result["n"], sol=sol,
+                        title=f"{name}: {method}",
                         results_dir=results_dir,
-                        filename="trajectory_uniform_baseline",
+                        filename=f"trajectory_{name}_{method}",
                         show=args.show,
                     )
-                else:
-                    print(f"Uniform baseline: {prob.status}")
-            except Exception as exc:
-                print(f"Uniform baseline failed: {exc}")
 
-            # Per-loss plots
-            for loss_name, result in loss_results.items():
-                print(f"Plotting {loss_name}...")
-                print(f"  OCP cost: {result['history'][-1]['loss_ocp']:.6f}")
-                plot_loss_results(loss_name, result, results_dir,
-                                  show=args.show)
-
-                # Stiff system trajectory for each loss
-                dts_final = np.array(result["history"][-1]['dts']).flatten()
+        # Uniform-timestep baseline trajectory
+        if method_results:
+            n_uniform = next(iter(method_results.values()))["n"]
+        elif loss_results:
+            n_uniform = next(iter(loss_results.values()))["n"]
+        else:
+            n_uniform = 40
+        dt_uniform = T / n_uniform
+        try:
+            prob, s_base, u_base = create_stiff_sys_baseline_clqr(
+                n_uniform, s0, A, B, Q, R, dt_uniform, u_max, x_max,
+            )
+            prob.solve()
+            if prob.status in ("optimal", "optimal_inaccurate"):
+                print(f"--- Uniform: OCP cost ---")
+                print(f"  n={n_uniform}, cost={prob.objective.value:.6f}")
+                dts_uniform = np.full(n_uniform, dt_uniform)
+                s_base_arr = np.vstack(
+                    [s0] + [s_base[i + 1].value.flatten()
+                            for i in range(n_uniform)])
+                u_base_arr = np.array([u_base[i].value.flatten()
+                                       for i in range(n_uniform)])
                 plot_stiff_sys_trajectory(
-                    dts_final, result["n"], sol=result["sol"],
-                    title=loss_name,
+                    dts_uniform, n_uniform,
+                    s_arr=s_base_arr, u_arr=u_base_arr,
+                    title=(f"Uniform baseline (n={n_uniform}, "
+                           f"cost={prob.objective.value:.4f})"),
                     results_dir=results_dir,
-                    filename=f"trajectory_{loss_name}",
+                    filename="trajectory_uniform_baseline",
                     show=args.show,
                 )
+            else:
+                print(f"Uniform baseline: {prob.status}")
+        except Exception as exc:
+            print(f"Uniform baseline failed: {exc}")
 
-            # Continuous costs
-            print_continuous_costs(method_results, loss_results,
-                                  s0_eval=s0, A=A, B=B, Q=Q, R=R, T=T)
+        # Per-loss plots
+        for loss_name, result in loss_results.items():
+            print(f"Plotting {loss_name}...")
+            print(f"  OCP cost: {result['history'][-1]['loss_ocp']:.6f}")
+            plot_loss_results(loss_name, result, results_dir,
+                              show=args.show)
 
-            # Loss comparison
-            plot_loss_comparison(loss_results, results_dir, show=args.show)
+            # Stiff system trajectory for each loss
+            dts_final = np.array(result["history"][-1]['dts']).flatten()
+            plot_stiff_sys_trajectory(
+                dts_final, result["n"], sol=result["sol"],
+                title=loss_name,
+                results_dir=results_dir,
+                filename=f"trajectory_{loss_name}",
+                show=args.show,
+            )
 
-            # Baseline sweep
-            if args.baseline:
-                print("Running baseline sweep...")
-                plot_baseline_sweep(results_dir, show=args.show)
+        # Continuous costs
+        print_continuous_costs(method_results, loss_results,
+                              s0_eval=s0, A=A, B=B, Q=Q, R=R, T=T)
 
-        # Cross-method/loss analysis
-        method_solutions = _build_method_solutions(method_results, loss_results)
-        if method_solutions:
-            print(f"Analysis: {len(method_solutions)} variants")
-            plot_density_analysis_grid(method_solutions, T, colors, results_dir,
-                                      show=args.show)
+        # Loss comparison
+        plot_loss_comparison(loss_results, results_dir, show=args.show)
 
-        # Summary
-        save_summary(method_results, loss_results, results_dir,
-                     s0_eval=s0, A=A, B=B, Q=Q, R=R, T=T)
+        # Baseline sweep
+        if args.baseline:
+            print("Running baseline sweep...")
+            plot_baseline_sweep(results_dir, show=args.show)
 
-        print(f"\nPlots saved to: {results_dir}")
+    # Cross-method/loss analysis
+    method_solutions = _build_method_solutions(method_results, loss_results)
+    if method_solutions:
+        print(f"Analysis: {len(method_solutions)} variants")
+        plot_density_analysis_grid(method_solutions, T, colors, results_dir,
+                                  show=args.show)
+
+    # Summary
+    save_summary(method_results, loss_results, results_dir,
+                 s0_eval=s0, A=A, B=B, Q=Q, R=R, T=T)
+
+    print(f"\nPlots saved to: {results_dir}")
 
     if args.show:
         plt.show()

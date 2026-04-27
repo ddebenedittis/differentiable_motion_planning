@@ -29,17 +29,16 @@ from pann_prob import (
 )
 from utils import (
     LOSS_REGISTRY,
-    REPARAM_CHOICES,
     AdaptiveGradientBalancer,
     RunMode,
     build_loss_kwargs,
     euler_matrices,
     get_n_epochs,
-    get_reparam_fn,
     load_losses_config,
     pickle_name,
     resolve_loss_names,
     Ad_Bd_from_dt,
+    theta_2_dt,
     zoh_cost_matrices,
     task_loss,
     uniform_resampling_loss,
@@ -258,8 +257,7 @@ _INTERNAL_METHOD_KEY = {
 }
 
 
-def train_softmax_method(method_name, n, n_epochs, lr, data_dir, n_default=160,
-                         reparam="softmax"):
+def train_softmax_method(method_name, n, n_epochs, lr, data_dir, n_default=160):
     """Train a softmax-based method.
 
     Args:
@@ -269,14 +267,12 @@ def train_softmax_method(method_name, n, n_epochs, lr, data_dir, n_default=160,
         lr: learning rate
         data_dir: directory for pickle output
         n_default: default n for pickle naming (used by zoh)
-        reparam: reparametrization ("softmax" or "logsoftmax")
 
     Returns:
         sol: solution dict or tensors
         history: list of history dicts
     """
     internal_key = _INTERNAL_METHOD_KEY[method_name]
-    theta_2_dt = get_reparam_fn(reparam)
 
     # Use float32 for most methods, consistent with notebook
     dtype = torch.float32
@@ -324,11 +320,6 @@ def train_softmax_method(method_name, n, n_epochs, lr, data_dir, n_default=160,
     # Determine if this method shares pickles with another (hs_uniform/hs_substeps)
     sol_name, hist_name, dist_name = _pickle_names(method_name, n, n_default)
 
-    # Add suffix for non-default reparametrization
-    sol_name += f"_{reparam}"
-    hist_name += f"_{reparam}"
-    dist_name += f"_{reparam}"
-
     # For hs methods, we need to handle shared pickle files
     if method_name in ("hs_uniform", "hs_substeps"):
         # Try to load existing sol/history to merge
@@ -358,15 +349,13 @@ def train_softmax_method(method_name, n, n_epochs, lr, data_dir, n_default=160,
 # ============================================================================ #
 
 def train_one_loss(loss_name, n, n_epochs, lr, lambda0, use_balancing, data_dir,
-                   disc="foe", reparam="softmax"):
+                   disc="foe"):
     """ZOH3 training loop with one alternative loss as regularizer.
 
     Returns:
         sol: list of torch tensors (QP solution)
         history: list of dicts with training metrics
     """
-    theta_2_dt = get_reparam_fn(reparam)
-
     # Use float64 to match cvxpylayers output dtype
     dtype = torch.float64
     A_t = torch.tensor(A, dtype=dtype)
@@ -457,13 +446,189 @@ def train_one_loss(loss_name, n, n_epochs, lr, lambda0, use_balancing, data_dir,
             )
 
     # Save results
-    suffix = f"_{reparam}"
-    save_pickle(data_dir, f"sol_{loss_name}{suffix}", sol)
-    save_pickle(data_dir, f"history_{loss_name}{suffix}", history)
-    save_dts_distribution(data_dir, f"dts_dist_{loss_name}{suffix}", history)
+    save_pickle(data_dir, f"sol_{loss_name}", sol)
+    save_pickle(data_dir, f"history_{loss_name}", history)
+    save_dts_distribution(data_dir, f"dts_dist_{loss_name}", history)
 
     print(f"  Final loss: {history[-1]['loss']:.6f}")
     return sol, history
+
+
+# ============================================================================ #
+# Custom Composite Loss Training
+# ============================================================================ #
+
+def train_custom_loss(loss_weights, n=None, n_epochs=200, lr=3e-2, detach="none",
+                      discretization="zoh", ocp_weight=1.0,
+                      tau_schedule=None):
+    """Training loop with a custom composite loss.
+
+    The total loss is:  w_ocp * L_ocp + sum_i (w_i * L_i)
+
+    Args:
+        loss_weights: dict of {loss_name: weight}, e.g. {"L_IV": 0.2, "L_EQ": 0.3}.
+                      Weights are fixed (no adaptive balancing).
+        n: number of timesteps (default: 40)
+        n_epochs: number of training epochs
+        lr: learning rate
+        detach: gradient detach mode ("none", "reg", "all")
+        discretization: "zoh" (exact ZOH via matrix exp) or "euler" (forward Euler)
+        ocp_weight: weight for L_ocp (default: 1.0)
+        tau_schedule: temperature schedule for the softmax. Either None (constant
+                      tau=1, equivalent to no annealing) or a tuple
+                      (kind, tau_start, tau_end) with kind in {"linear", "exp"}.
+                      The softmax becomes  softmax(theta / tau(epoch)). Small tau
+                      sharpens, large tau flattens; with Adam, only a *changing*
+                      tau perturbs the optimizer (constant tau is absorbed by the
+                      EMA).
+
+    Returns:
+        sol: list of torch tensors (QP solution)
+        history: list of dicts with training metrics
+        n: number of timesteps used
+    """
+    if discretization not in ("zoh", "euler"):
+        raise ValueError(
+            f"discretization must be 'zoh' or 'euler', got '{discretization}'")
+
+    if tau_schedule is None:
+        def tau_at(epoch):
+            return 1.0
+    else:
+        kind, tau_start, tau_end = tau_schedule
+        if kind not in ("linear", "exp"):
+            raise ValueError(f"tau_schedule kind must be 'linear' or 'exp', got '{kind}'")
+        if tau_start <= 0 or tau_end <= 0:
+            raise ValueError("tau_start and tau_end must be positive")
+        if kind == "linear":
+            def tau_at(epoch):
+                if n_epochs <= 1:
+                    return float(tau_end)
+                t = epoch / (n_epochs - 1)
+                return float(tau_start + (tau_end - tau_start) * t)
+        else:
+            log_start = np.log(tau_start)
+            log_end = np.log(tau_end)
+            def tau_at(epoch):
+                if n_epochs <= 1:
+                    return float(tau_end)
+                t = epoch / (n_epochs - 1)
+                return float(np.exp(log_start + (log_end - log_start) * t))
+
+    n = n or 40
+    dtype = torch.float64
+    A_t = torch.tensor(A, dtype=dtype)
+    B_t = torch.tensor(B, dtype=dtype)
+    Q_t = torch.tensor(Q, dtype=dtype)
+    R_t = torch.tensor(R, dtype=dtype)
+    s0_t = torch.tensor(s0, dtype=dtype)
+
+    for name in loss_weights:
+        if name not in LOSS_REGISTRY:
+            raise ValueError(
+                f"Unknown loss: {name}. Available: {list(LOSS_REGISTRY.keys())}")
+
+    theta = torch.nn.Parameter(torch.ones(n, 1, dtype=dtype))
+    optim = torch.optim.Adam([theta], lr=lr)
+
+    if discretization == "zoh":
+        _, layer, _, _, _, _, _, _ = create_exact_zoh_cost_clqr(
+            n, s0, n_s, n_u, u_max,
+        )
+    else:
+        _, layer, _, _, _ = create_pann_param_clqr_2(n, s0, A, B, Q, R, u_max)
+
+    disc_fn = zoh_cost_matrices if discretization == "zoh" else euler_matrices
+
+    loss_fns = {name: LOSS_REGISTRY[name] for name in loss_weights}
+
+    history = []
+    sol = None
+
+    label = " + ".join(f"{w}*{name}" for name, w in loss_weights.items())
+    disc_tag = discretization.upper()
+    with tqdm(total=n_epochs, desc=f"custom/{disc_tag} ({label})") as pbar:
+        for epoch in range(n_epochs):
+            pbar.update(1)
+            optim.zero_grad(set_to_none=True)
+
+            tau = tau_at(epoch)
+            theta_eff = theta if tau == 1.0 else theta / tau
+            dts_torch = theta_2_dt(theta_eff, T, n)
+
+            Ad_list, Bd_list, Lx_list, Lu_list, W_list = [], [], [], [], []
+            for k in range(n):
+                Ad_k, Bd_k, W_k = disc_fn(
+                    dts_torch[k], A_t, B_t, Q_t, R_t,
+                )
+                Ad_list.append(Ad_k)
+                Bd_list.append(Bd_k)
+                W_list.append(W_k)
+
+                if discretization == "zoh":
+                    L_k = torch.linalg.cholesky(W_k)
+                    LT_k = L_k.T
+                    Lx_list.append(LT_k[:, :n_s])
+                    Lu_list.append(LT_k[:, n_s:])
+
+            if discretization == "zoh":
+                sol = layer(*Ad_list, *Bd_list, *Lx_list, *Lu_list)
+            else:
+                sol = layer(dts_torch)
+
+            states = [s0_t] + [sol[k] for k in range(n)]
+            inputs = [sol[n + k] for k in range(n)]
+
+            if detach in ("reg", "all"):
+                states_d = [s.detach() for s in states]
+                inputs_d = [u.detach() for u in inputs]
+            states_ocp = states_d if detach == "all" else states
+            inputs_ocp = inputs_d if detach == "all" else inputs
+            states_reg = states_d if detach in ("reg", "all") else states
+            inputs_reg = inputs_d if detach in ("reg", "all") else inputs
+
+            loss_ocp = torch.tensor(0.0, dtype=dtype)
+            for k in range(n):
+                z_k = torch.cat([states_ocp[k], inputs_ocp[k]])
+                loss_ocp = loss_ocp + z_k @ W_list[k] @ z_k
+
+            reg_losses = {}
+            loss_reg_total = torch.tensor(0.0, dtype=dtype)
+            for name, w in loss_weights.items():
+                kwargs = build_loss_kwargs(
+                    name, states_reg, inputs_reg, dts_torch, W_list,
+                    Ad_list, Bd_list, A_t, B_t, Q_t, R_t,
+                    T=T, u_max=u_max,
+                )
+                l_reg = loss_fns[name](**kwargs)
+                reg_losses[name] = float(l_reg.item())
+                loss_reg_total = loss_reg_total + w * l_reg
+
+            loss = ocp_weight * loss_ocp + loss_reg_total
+            loss.backward()
+            optim.step()
+
+            entry = {
+                "epoch": epoch,
+                "loss": float(loss.item()),
+                "loss_ocp": float(loss_ocp.item()),
+                "loss_reg_total": float(loss_reg_total.item()),
+                "dts": dts_torch.detach().cpu().numpy(),
+                "tau": tau,
+                "detach": detach,
+            }
+            entry.update({f"loss_{name}": v for name, v in reg_losses.items()})
+            history.append(entry)
+
+            pbar.set_postfix(
+                loss=f"{loss.item():.4f}",
+                ocp=f"{loss_ocp.item():.4f}",
+                reg=f"{loss_reg_total.item():.4f}",
+                tau=f"{tau:.3f}",
+            )
+
+    print(f"  Final loss: {history[-1]['loss']:.6f}")
+    return sol, history, n
 
 
 # ============================================================================ #
@@ -509,11 +674,6 @@ def main():
         help="Pickle output directory (default: data/pann_clqr_dt)",
     )
     parser.add_argument(
-        "--reparam", default="softmax",
-        choices=[*REPARAM_CHOICES, "both"],
-        help="Reparametrization: softmax, logsoftmax, or both (default: softmax)",
-    )
-    parser.add_argument(
         "--config", default=None, metavar="PATH",
         help="Path to losses_config.json (default: time_optimization/losses_config.json). "
              "Controls which losses run when --loss default is used.",
@@ -531,12 +691,9 @@ def main():
     # Default n for pickle naming (matches notebook default)
     n_default = 160
 
-    reparams = list(REPARAM_CHOICES) if args.reparam == "both" else [args.reparam]
-
     save_run_config(data_dir, args)
 
     print(f"Output directory: {data_dir}")
-    print(f"Reparametrizations: {reparams}")
     print(f"Mode: {args.mode}")
     print()
 
@@ -548,26 +705,25 @@ def main():
                 parser.error(f"Unknown method: {m}. Available: {ALL_METHODS}")
 
         print(f"Methods: {methods}")
-        for reparam in reparams:
-            for method_name in methods:
-                n = args.n or DEFAULT_N[method_name]
-                lr = args.lr or DEFAULT_LR[method_name]
-                epoch_key = method_name
-                if method_name in ("hs_uniform", "hs_substeps"):
-                    epoch_key = "hs"
-                n_epochs = args.epochs or get_n_epochs(run_mode, epoch_key)
+        for method_name in methods:
+            n = args.n or DEFAULT_N[method_name]
+            lr = args.lr or DEFAULT_LR[method_name]
+            epoch_key = method_name
+            if method_name in ("hs_uniform", "hs_substeps"):
+                epoch_key = "hs"
+            n_epochs = args.epochs or get_n_epochs(run_mode, epoch_key)
 
-                print(f"\n{'=' * 40}")
-                print(f"Training {method_name} [{reparam}] (n={n}, epochs={n_epochs}, lr={lr})")
-                print(f"{'=' * 40}")
+            print(f"\n{'=' * 40}")
+            print(f"Training {method_name} (n={n}, epochs={n_epochs}, lr={lr})")
+            print(f"{'=' * 40}")
 
-                if method_name == "aux":
-                    train_aux(n, n_epochs, lr, data_dir)
-                else:
-                    train_softmax_method(
-                        method_name, n, n_epochs, lr, data_dir,
-                        n_default=n_default, reparam=reparam,
-                    )
+            if method_name == "aux":
+                train_aux(n, n_epochs, lr, data_dir)
+            else:
+                train_softmax_method(
+                    method_name, n, n_epochs, lr, data_dir,
+                    n_default=n_default,
+                )
 
     # Alt losses training
     if args.experiment in ("losses", "all"):
@@ -586,20 +742,18 @@ def main():
               f"{'adaptive' if not args.no_balancing else 'fixed'}, "
               f"lambda0={args.lambda0}, disc={args.disc}")
 
-        for reparam in reparams:
-            for loss_name in loss_names:
-                n_epochs = args.epochs or get_n_epochs(run_mode, loss_name)
-                lambda0 = per_loss_cfg.get(loss_name, {}).get("lambda0", args.lambda0)
+        for loss_name in loss_names:
+            n_epochs = args.epochs or get_n_epochs(run_mode, loss_name)
+            lambda0 = per_loss_cfg.get(loss_name, {}).get("lambda0", args.lambda0)
 
-                print(f"\n{'=' * 40}")
-                print(f"Training {loss_name} [{reparam}] ({n_epochs} epochs, lambda0={lambda0})")
-                print(f"{'=' * 40}")
+            print(f"\n{'=' * 40}")
+            print(f"Training {loss_name} ({n_epochs} epochs, lambda0={lambda0})")
+            print(f"{'=' * 40}")
 
-                train_one_loss(
-                    loss_name, n_loss, n_epochs, lr_loss, lambda0,
-                    not args.no_balancing, data_dir, disc=args.disc,
-                    reparam=reparam,
-                )
+            train_one_loss(
+                loss_name, n_loss, n_epochs, lr_loss, lambda0,
+                not args.no_balancing, data_dir, disc=args.disc,
+            )
 
     print(f"\nResults saved to: {data_dir}")
 

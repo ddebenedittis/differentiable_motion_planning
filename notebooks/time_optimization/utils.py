@@ -202,39 +202,6 @@ def theta_2_dt(theta, T, n, eps=5e-3):
     return eps + (T - n * eps) * w
 
 
-def theta_2_dt_logsoftmax(theta, T, n, eps=5e-3):
-    """Log-softmax simplex mapping: theta -> non-uniform timesteps summing to T.
-
-    Routes the gradient through log_softmax (Jacobian entries O(1) near
-    uniform) then exp, instead of a single softmax call (O(1/n) entries).
-    Provides a more informative gradient landscape when samples cluster
-    near T/N (uniform distribution).
-
-    Args:
-        theta: learnable parameters, shape (n, 1) or (n,)
-        T: total time horizon
-        n: number of timesteps
-        eps: minimum timestep duration
-
-    Returns:
-        dts: shape (n,), positive timesteps summing to T
-    """
-    log_w = torch.log_softmax(theta.flatten(), dim=0)
-    return eps + (T - n * eps) * torch.exp(log_w)
-
-
-REPARAM_CHOICES = ("softmax", "logsoftmax")
-
-
-def get_reparam_fn(name):
-    """Return the theta-to-dt mapping function for the given reparametrization."""
-    if name == "softmax":
-        return theta_2_dt
-    if name == "logsoftmax":
-        return theta_2_dt_logsoftmax
-    raise ValueError(f"Unknown reparam: {name}. Available: {REPARAM_CHOICES}")
-
-
 # ============================================================================ #
 # Loss Functions
 # ============================================================================ #
@@ -438,6 +405,37 @@ def loss_iv(inputs, dts):
     return torch.sum(dts[:-1] * torch.sum(du**2, dim=1))
 
 
+def loss_iv_rate(inputs, dts):
+    """L_IV_rate = sum_{k=0}^{n-2} ||u_{k+1} - u_k||^2 / dt_k
+
+    Discrete approximation of integral of ||du/dt||^2: penalizes the squared
+    input rate of change. Unlike L_IV, this *raises* cost on big jumps in long
+    intervals (a step over large dt_k implies a large derivative). The QP's
+    preferred response is to spread input change across multiple intervals,
+    which forces the optimizer to allocate more samples around transitions.
+    """
+    u_stack = torch.stack(inputs)
+    du = torch.diff(u_stack, dim=0)
+    return torch.sum(torch.sum(du**2, dim=1) / dts[:-1])
+
+
+def loss_iv_sym(inputs, dts):
+    """L_IV_sym = sum_{k=0}^{n-2} (dt_k + dt_{k+1}) * ||u_{k+1} - u_k||^2
+
+    Symmetric (two-sided) input variation: each Δu_k is weighted by BOTH
+    adjacent intervals. Compared to L_IV (which weights only by dt_k), this
+    blocks the failure modes where Δu hides in a single small dt:
+      - Tiny-dt gaming: shrinking dt_k still leaves dt_{k+1}, so the penalty
+        on a huge Δu_k cannot vanish.
+      - Boundary-spike: the transition between fine and coarse regions is
+        weighted by the plateau dt (the larger neighbor), making it expensive.
+    """
+    u_stack = torch.stack(inputs)
+    du = torch.diff(u_stack, dim=0)
+    dt_pair = dts[:-1] + dts[1:]
+    return torch.sum(dt_pair * torch.sum(du**2, dim=1))
+
+
 def loss_eq(inputs):
     """L_EQ = sum_k (w_k - w_bar)^2 where w_k = ||u_{k+1} - u_k||^2
 
@@ -615,6 +613,8 @@ def loss_pwlh(states, inputs, dts, A, B, Q, R, n_sub=10):
 LOSS_REGISTRY = {
     "L_SSD": loss_ssd,
     "L_IV": loss_iv,
+    "L_IV_rate": loss_iv_rate,
+    "L_IV_sym": loss_iv_sym,
     "L_EQ": loss_eq,
     "L_CPC": loss_cpc,
     "L_CSS": loss_css,
@@ -636,6 +636,10 @@ def build_loss_kwargs(loss_name, states, inputs, dts, W_list, Ad_list, Bd_list,
     if loss_name == "L_SSD":
         return dict(dts=dts)
     elif loss_name == "L_IV":
+        return dict(inputs=inputs, dts=dts)
+    elif loss_name == "L_IV_rate":
+        return dict(inputs=inputs, dts=dts)
+    elif loss_name == "L_IV_sym":
         return dict(inputs=inputs, dts=dts)
     elif loss_name == "L_EQ":
         return dict(inputs=inputs)
@@ -1060,7 +1064,7 @@ def load_method_results(data_dir, method_configs, suffix=""):
     Args:
         data_dir: directory containing pickles
         method_configs: list of MethodConfig instances
-        suffix: pickle name suffix (e.g. "_logsoftmax")
+        suffix: optional pickle name suffix
 
     Returns:
         results: dict of {method_name: {sol, history, n, internal_methods, sol_method}}
@@ -1090,7 +1094,7 @@ def load_loss_results(data_dir, loss_names=None, suffix=""):
 
     Args:
         loss_names: None (no losses), "all" (all available), or list of names.
-        suffix: pickle name suffix (e.g. "_logsoftmax")
+        suffix: optional pickle name suffix
 
     Returns:
         results: dict of {loss_name: {"sol": ..., "history": ..., "n": ...}}
