@@ -669,6 +669,172 @@ def build_loss_kwargs(loss_name, states, inputs, dts, W_list, Ad_list, Bd_list,
 
 
 # ============================================================================ #
+# R-Adaptive Mesh Moves
+# ============================================================================ #
+
+def compute_importance(states, inputs, dts, Q, R, mode="cost_density"):
+    """Per-timestep and per-pair importance scores for r-adaptive merge/split.
+
+    Returns (eta_single, eta_pair):
+        eta_single: shape (n,) — per-timestep score for split selection.
+        eta_pair:   shape (n-1,) — per-adjacent-pair score for merge selection.
+
+    Both arrays use averaging (not summing) over their constituents so that
+    boundary timesteps with fewer neighbors are not down-weighted.
+
+    Modes:
+        "cost_density":
+            single[k] = s_k'Q s_k + u_k'R u_k
+            pair[k]   = (single[k] + single[k+1]) / 2
+        "control_var":
+            Let du2[k] = ||u_{k+1} - u_k||^2 for k in [0, n-2].
+            single[k] = mean of available adjacent du2:
+                interior:    (du2[k-1] + du2[k]) / 2
+                edge k=0:    du2[0]
+                edge k=n-1:  du2[n-2]
+            pair[k]   = du2[k]
+        "combined":
+            geometric mean of cost_density and control_var, applied separately
+            to single and pair arrays.
+    """
+    n = len(inputs)
+
+    if mode == "cost_density":
+        Q_t = torch.as_tensor(Q, dtype=dts.dtype, device=dts.device)
+        R_t = torch.as_tensor(R, dtype=dts.dtype, device=dts.device)
+        eta_t = torch.zeros(n, dtype=dts.dtype, device=dts.device)
+        for k in range(n):
+            s_k = states[k]
+            u_k = inputs[k]
+            eta_t[k] = s_k @ Q_t @ s_k + u_k @ R_t @ u_k
+        eta_single = eta_t.detach().cpu().numpy()
+        eta_pair = 0.5 * (eta_single[:-1] + eta_single[1:])
+        return eta_single, eta_pair
+
+    if mode == "control_var":
+        if n < 2:
+            return np.zeros(n), np.zeros(max(n - 1, 0))
+        du2_t = torch.zeros(n - 1, dtype=dts.dtype, device=dts.device)
+        for k in range(n - 1):
+            du = inputs[k + 1] - inputs[k]
+            du2_t[k] = torch.sum(du * du)
+        du2 = du2_t.detach().cpu().numpy()
+        eta_single = np.empty(n, dtype=du2.dtype)
+        eta_single[0] = du2[0]
+        eta_single[n - 1] = du2[n - 2]
+        if n > 2:
+            eta_single[1:-1] = 0.5 * (du2[:-1] + du2[1:])
+        eta_pair = du2
+        return eta_single, eta_pair
+
+    if mode == "combined":
+        cd_single, cd_pair = compute_importance(
+            states, inputs, dts, Q, R, "cost_density")
+        cv_single, cv_pair = compute_importance(
+            states, inputs, dts, Q, R, "control_var")
+        eta_single = np.sqrt(
+            np.clip(cd_single, 0.0, None) * np.clip(cv_single, 0.0, None))
+        eta_pair = np.sqrt(
+            np.clip(cd_pair, 0.0, None) * np.clip(cv_pair, 0.0, None))
+        return eta_single, eta_pair
+
+    raise ValueError(f"Unknown importance mode: {mode}")
+
+
+def select_merge_split(eta_single, eta_pair, theta_np, beta=1.0, rng=None):
+    """Select an adjacent merge pair (j, j+1) and a split index i.
+
+    With finite `beta`, sampled by softmax: merge ~ exp(-beta * eta_pair),
+    split ~ exp(beta * eta_single). With `beta = np.inf` the selection is
+    deterministic: j = argmin(eta_pair), i = argmax(eta_single) over indices
+    outside {j, j+1}.
+
+    Returns (j, i) or None when n < 3.
+    """
+    n = len(eta_single)
+    if n < 3:
+        return None
+
+    eta_pair_arr = np.asarray(eta_pair)
+    eta_single_arr = np.asarray(eta_single)
+
+    if np.isposinf(beta):
+        j = int(np.argmin(eta_pair_arr))
+        valid_mask = np.ones(n, dtype=bool)
+        valid_mask[j] = False
+        valid_mask[j + 1] = False
+        valid_idx = np.where(valid_mask)[0]
+        if len(valid_idx) == 0:
+            return None
+        i = int(valid_idx[np.argmax(eta_single_arr[valid_idx])])
+        return j, i
+
+    if rng is None:
+        rng = np.random.default_rng()
+
+    pair_logits = -beta * eta_pair_arr
+    pair_logits = pair_logits - pair_logits.max()
+    pair_w = np.exp(pair_logits)
+    pair_p = pair_w / pair_w.sum()
+    j = int(rng.choice(n - 1, p=pair_p))
+
+    valid = np.array([k for k in range(n) if k != j and k != j + 1])
+    if len(valid) == 0:
+        return None
+    split_logits = beta * eta_single_arr[valid]
+    split_logits = split_logits - split_logits.max()
+    split_w = np.exp(split_logits)
+    split_p = split_w / split_w.sum()
+    i = int(rng.choice(valid, p=split_p))
+
+    return j, i
+
+
+def apply_merge_split(theta_np, j, i):
+    """Apply a merge-split move in theta-space (softmax-mass preserving).
+
+    Merge (j, j+1):  theta_new[j] = logsumexp(theta_j, theta_{j+1}); drop j+1.
+    Split i (post-merge index): replace by two entries each = theta_i - log 2.
+
+    The total softmax mass is preserved exactly (sum stays 1, dt on simplex).
+
+    Args:
+        theta_np: numpy array of shape (n, 1).
+        j: merge index (0..n-2).
+        i: split index in original numbering, must satisfy i not in {j, j+1}.
+
+    Returns:
+        new_theta: numpy array of shape (n, 1).
+    """
+    if i == j or i == j + 1:
+        raise ValueError(
+            f"split index i={i} cannot be in merge pair (j={j}, j+1={j+1})")
+
+    n = theta_np.shape[0]
+    theta_flat = theta_np.flatten().copy()
+    dtype = theta_flat.dtype
+
+    a, b = theta_flat[j], theta_flat[j + 1]
+    M = max(a, b)
+    theta_merged = M + np.log(np.exp(a - M) + np.exp(b - M))
+
+    merged = np.delete(theta_flat, j + 1)
+    merged[j] = theta_merged
+
+    i_new = i - 1 if i > j + 1 else i
+
+    split_val = merged[i_new] - np.array(np.log(2.0), dtype=dtype)
+
+    new_flat = np.empty(n, dtype=dtype)
+    new_flat[:i_new] = merged[:i_new]
+    new_flat[i_new] = split_val
+    new_flat[i_new + 1] = split_val
+    new_flat[i_new + 2:] = merged[i_new + 1:]
+
+    return new_flat.reshape(n, 1)
+
+
+# ============================================================================ #
 # Adaptive Gradient Balancing
 # ============================================================================ #
 
@@ -951,14 +1117,16 @@ def save_timesteps_video(out_dir, name, history=None, T=None, fps=15, dpi=100,
     if T is None:
         T = float(dts_all[0].sum())
     n_epochs, n = dts_all.shape
-    times_all = np.cumsum(dts_all, axis=1)
+    starts_all = np.concatenate(
+        [np.zeros((n_epochs, 1)), np.cumsum(dts_all, axis=1)[:, :-1]], axis=1
+    )
 
     dt_min = dts_all.min() * 0.9
     dt_max = dts_all.max() * 1.1
     dt_uniform = T / n
 
     fig, ax = plt.subplots(figsize=(6.4, 3.2))
-    (line,) = ax.plot([], [], 'b-', linewidth=1.2)
+    (line,) = ax.plot([], [], 'b-', linewidth=1.2, drawstyle='steps-post')
     ax.set_xlim(0, T)
     ax.set_ylim(dt_min, dt_max)
     ax.set_xlabel("Time")
@@ -973,7 +1141,7 @@ def save_timesteps_video(out_dir, name, history=None, T=None, fps=15, dpi=100,
         return line, title
 
     def update(frame):
-        line.set_data(times_all[frame], dts_all[frame])
+        line.set_data(starts_all[frame], dts_all[frame])
         title.set_text(f"Epoch {frame}")
         return line, title
 

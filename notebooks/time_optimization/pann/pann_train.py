@@ -12,6 +12,7 @@ Usage:
 """
 
 import argparse
+import math
 import os
 import sys
 
@@ -31,13 +32,16 @@ from utils import (
     LOSS_REGISTRY,
     AdaptiveGradientBalancer,
     RunMode,
+    apply_merge_split,
     build_loss_kwargs,
+    compute_importance,
     euler_matrices,
     get_n_epochs,
     load_losses_config,
     pickle_name,
     resolve_loss_names,
     Ad_Bd_from_dt,
+    select_merge_split,
     theta_2_dt,
     zoh_cost_matrices,
     task_loss,
@@ -460,7 +464,16 @@ def train_one_loss(loss_name, n, n_epochs, lr, lambda0, use_balancing, data_dir,
 
 def train_custom_loss(loss_weights, n=None, n_epochs=200, lr=3e-2, detach="none",
                       discretization="zoh", ocp_weight=1.0,
-                      tau_schedule=None):
+                      tau_schedule=None,
+                      radapt_enable=False,
+                      radapt_every=10,
+                      radapt_freq_schedule=None,
+                      radapt_importance="combined",
+                      radapt_beta=1.0,
+                      radapt_temp_schedule=("exp", 1.0, 0.01),
+                      radapt_warmup=20,
+                      radapt_cooldown=20,
+                      radapt_seed=None):
     """Training loop with a custom composite loss.
 
     The total loss is:  w_ocp * L_ocp + sum_i (w_i * L_i)
@@ -481,6 +494,17 @@ def train_custom_loss(loss_weights, n=None, n_epochs=200, lr=3e-2, detach="none"
                       sharpens, large tau flattens; with Adam, only a *changing*
                       tau perturbs the optimizer (constant tau is absorbed by the
                       EMA).
+        radapt_enable: master switch for r-adaptive merge/split moves with
+                      Metropolis acceptance (simulated annealing on the grid).
+        radapt_every: attempt a move every K epochs (when no freq_schedule).
+        radapt_freq_schedule: optional (start_every, end_every) to anneal frequency.
+        radapt_importance: "cost_density" | "control_var" | "combined".
+        radapt_beta: inverse-temperature for probabilistic merge/split selection.
+        radapt_temp_schedule: (kind, T_start, T_end) for Metropolis temperature,
+                              kind in {"linear", "exp"}.
+        radapt_warmup: skip moves before this epoch.
+        radapt_cooldown: skip moves in the final K epochs.
+        radapt_seed: integer seed for the move RNG (separate from torch RNG).
 
     Returns:
         sol: list of torch tensors (QP solution)
@@ -542,6 +566,108 @@ def train_custom_loss(loss_weights, n=None, n_epochs=200, lr=3e-2, detach="none"
 
     loss_fns = {name: LOSS_REGISTRY[name] for name in loss_weights}
 
+    if radapt_temp_schedule is None:
+        def temp_at(epoch):
+            return 0.0
+    else:
+        kind_T, T_start, T_end = radapt_temp_schedule
+        if kind_T not in ("linear", "exp"):
+            raise ValueError(
+                f"radapt_temp_schedule kind must be 'linear' or 'exp', got '{kind_T}'")
+        if T_start <= 0 or T_end <= 0:
+            raise ValueError("radapt temperature endpoints must be positive")
+        if kind_T == "linear":
+            def temp_at(epoch):
+                if n_epochs <= 1:
+                    return float(T_end)
+                t = epoch / (n_epochs - 1)
+                return float(T_start + (T_end - T_start) * t)
+        else:
+            log_T_start = np.log(T_start)
+            log_T_end = np.log(T_end)
+            def temp_at(epoch):
+                if n_epochs <= 1:
+                    return float(T_end)
+                t = epoch / (n_epochs - 1)
+                return float(np.exp(log_T_start + (log_T_end - log_T_start) * t))
+
+    if radapt_freq_schedule is None:
+        def freq_at(epoch):
+            return int(radapt_every)
+    else:
+        f_start, f_end = radapt_freq_schedule
+        active_start = radapt_warmup
+        active_end = max(active_start, n_epochs - radapt_cooldown - 1)
+        def freq_at(epoch):
+            span = active_end - active_start
+            if span <= 0:
+                return max(1, int(f_end))
+            t = (epoch - active_start) / span
+            t = max(0.0, min(1.0, t))
+            return max(1, int(round(f_start + (f_end - f_start) * t)))
+
+    rng = np.random.default_rng(radapt_seed)
+
+    def _evaluate(epoch_):
+        """Forward QP + composite loss at the current theta."""
+        tau_l = tau_at(epoch_)
+        theta_eff_l = theta if tau_l == 1.0 else theta / tau_l
+        dts_l = theta_2_dt(theta_eff_l, T, n)
+
+        Ad_l, Bd_l, Lx_l, Lu_l, W_l = [], [], [], [], []
+        for k in range(n):
+            Ad_k, Bd_k, W_k = disc_fn(dts_l[k], A_t, B_t, Q_t, R_t)
+            Ad_l.append(Ad_k)
+            Bd_l.append(Bd_k)
+            W_l.append(W_k)
+            if discretization == "zoh":
+                L_k = torch.linalg.cholesky(W_k)
+                LT_k = L_k.T
+                Lx_l.append(LT_k[:, :n_s])
+                Lu_l.append(LT_k[:, n_s:])
+
+        if discretization == "zoh":
+            sol_l = layer(*Ad_l, *Bd_l, *Lx_l, *Lu_l)
+        else:
+            sol_l = layer(dts_l)
+
+        states_l = [s0_t] + [sol_l[k] for k in range(n)]
+        inputs_l = [sol_l[n + k] for k in range(n)]
+
+        if detach in ("reg", "all"):
+            states_d = [s.detach() for s in states_l]
+            inputs_d = [u.detach() for u in inputs_l]
+        states_ocp = states_d if detach == "all" else states_l
+        inputs_ocp = inputs_d if detach == "all" else inputs_l
+        states_reg = states_d if detach in ("reg", "all") else states_l
+        inputs_reg = inputs_d if detach in ("reg", "all") else inputs_l
+
+        loss_ocp_l = torch.tensor(0.0, dtype=dtype)
+        for k in range(n):
+            z_k = torch.cat([states_ocp[k], inputs_ocp[k]])
+            loss_ocp_l = loss_ocp_l + z_k @ W_l[k] @ z_k
+
+        reg_losses_l = {}
+        loss_reg_total_l = torch.tensor(0.0, dtype=dtype)
+        for name, w in loss_weights.items():
+            kwargs = build_loss_kwargs(
+                name, states_reg, inputs_reg, dts_l, W_l,
+                Ad_l, Bd_l, A_t, B_t, Q_t, R_t,
+                T=T, u_max=u_max,
+            )
+            l_reg = loss_fns[name](**kwargs)
+            reg_losses_l[name] = l_reg
+            loss_reg_total_l = loss_reg_total_l + w * l_reg
+
+        loss_l = ocp_weight * loss_ocp_l + loss_reg_total_l
+
+        return {
+            "loss": loss_l, "loss_ocp": loss_ocp_l,
+            "loss_reg_total": loss_reg_total_l,
+            "reg_losses": reg_losses_l, "sol": sol_l,
+            "states": states_l, "inputs": inputs_l, "dts": dts_l, "tau": tau_l,
+        }
+
     history = []
     sol = None
 
@@ -552,79 +678,91 @@ def train_custom_loss(loss_weights, n=None, n_epochs=200, lr=3e-2, detach="none"
             pbar.update(1)
             optim.zero_grad(set_to_none=True)
 
-            tau = tau_at(epoch)
-            theta_eff = theta if tau == 1.0 else theta / tau
-            dts_torch = theta_2_dt(theta_eff, T, n)
-
-            Ad_list, Bd_list, Lx_list, Lu_list, W_list = [], [], [], [], []
-            for k in range(n):
-                Ad_k, Bd_k, W_k = disc_fn(
-                    dts_torch[k], A_t, B_t, Q_t, R_t,
-                )
-                Ad_list.append(Ad_k)
-                Bd_list.append(Bd_k)
-                W_list.append(W_k)
-
-                if discretization == "zoh":
-                    L_k = torch.linalg.cholesky(W_k)
-                    LT_k = L_k.T
-                    Lx_list.append(LT_k[:, :n_s])
-                    Lu_list.append(LT_k[:, n_s:])
-
-            if discretization == "zoh":
-                sol = layer(*Ad_list, *Bd_list, *Lx_list, *Lu_list)
-            else:
-                sol = layer(dts_torch)
-
-            states = [s0_t] + [sol[k] for k in range(n)]
-            inputs = [sol[n + k] for k in range(n)]
-
-            if detach in ("reg", "all"):
-                states_d = [s.detach() for s in states]
-                inputs_d = [u.detach() for u in inputs]
-            states_ocp = states_d if detach == "all" else states
-            inputs_ocp = inputs_d if detach == "all" else inputs
-            states_reg = states_d if detach in ("reg", "all") else states
-            inputs_reg = inputs_d if detach in ("reg", "all") else inputs
-
-            loss_ocp = torch.tensor(0.0, dtype=dtype)
-            for k in range(n):
-                z_k = torch.cat([states_ocp[k], inputs_ocp[k]])
-                loss_ocp = loss_ocp + z_k @ W_list[k] @ z_k
-
-            reg_losses = {}
-            loss_reg_total = torch.tensor(0.0, dtype=dtype)
-            for name, w in loss_weights.items():
-                kwargs = build_loss_kwargs(
-                    name, states_reg, inputs_reg, dts_torch, W_list,
-                    Ad_list, Bd_list, A_t, B_t, Q_t, R_t,
-                    T=T, u_max=u_max,
-                )
-                l_reg = loss_fns[name](**kwargs)
-                reg_losses[name] = float(l_reg.item())
-                loss_reg_total = loss_reg_total + w * l_reg
-
-            loss = ocp_weight * loss_ocp + loss_reg_total
+            out = _evaluate(epoch)
+            loss = out["loss"]
             loss.backward()
             optim.step()
+            sol = out["sol"]
 
             entry = {
                 "epoch": epoch,
                 "loss": float(loss.item()),
-                "loss_ocp": float(loss_ocp.item()),
-                "loss_reg_total": float(loss_reg_total.item()),
-                "dts": dts_torch.detach().cpu().numpy(),
-                "tau": tau,
+                "loss_ocp": float(out["loss_ocp"].item()),
+                "loss_reg_total": float(out["loss_reg_total"].item()),
+                "dts": out["dts"].detach().cpu().numpy(),
+                "tau": out["tau"],
                 "detach": detach,
             }
-            entry.update({f"loss_{name}": v for name, v in reg_losses.items()})
+            entry.update({f"loss_{name}": float(v.item())
+                          for name, v in out["reg_losses"].items()})
+
+            radapt_fields = {
+                "radapt_attempted": False, "radapt_accepted": None,
+                "radapt_j": None, "radapt_i": None,
+                "radapt_dL": None, "radapt_T": None,
+            }
+
+            if (radapt_enable
+                    and radapt_warmup <= epoch < n_epochs - radapt_cooldown):
+                every_now = freq_at(epoch)
+                if every_now > 0 and (epoch - radapt_warmup) % every_now == 0:
+                    theta_snapshot = theta.detach().clone()
+                    with torch.no_grad():
+                        out_post = _evaluate(epoch)
+                    loss_before = float(out_post["loss"].item())
+
+                    eta_single, eta_pair = compute_importance(
+                        out_post["states"], out_post["inputs"], out_post["dts"],
+                        Q, R, mode=radapt_importance,
+                    )
+                    sel = select_merge_split(
+                        eta_single, eta_pair, theta.detach().cpu().numpy(),
+                        beta=radapt_beta, rng=rng,
+                    )
+                    if sel is not None:
+                        j, i = sel
+                        theta_new_np = apply_merge_split(
+                            theta.detach().cpu().numpy(), j, i,
+                        )
+                        with torch.no_grad():
+                            theta.copy_(torch.tensor(theta_new_np, dtype=dtype))
+
+                        with torch.no_grad():
+                            out_after = _evaluate(epoch)
+                        loss_after = float(out_after["loss"].item())
+
+                        T_metro = temp_at(epoch)
+                        dL = loss_after - loss_before
+                        if dL <= 0:
+                            accept = True
+                        elif T_metro <= 1e-12:
+                            accept = False
+                        else:
+                            accept = rng.random() < math.exp(-dL / T_metro)
+
+                        if accept:
+                            optim.state.clear()
+                        else:
+                            with torch.no_grad():
+                                theta.copy_(theta_snapshot)
+
+                        radapt_fields = {
+                            "radapt_attempted": True,
+                            "radapt_accepted": bool(accept),
+                            "radapt_j": int(j),
+                            "radapt_i": int(i),
+                            "radapt_dL": float(dL),
+                            "radapt_T": float(T_metro),
+                        }
+
+            entry.update(radapt_fields)
             history.append(entry)
 
             pbar.set_postfix(
                 loss=f"{loss.item():.4f}",
-                ocp=f"{loss_ocp.item():.4f}",
-                reg=f"{loss_reg_total.item():.4f}",
-                tau=f"{tau:.3f}",
+                ocp=f"{out['loss_ocp'].item():.4f}",
+                reg=f"{out['loss_reg_total'].item():.4f}",
+                tau=f"{out['tau']:.3f}",
             )
 
     print(f"  Final loss: {history[-1]['loss']:.6f}")
