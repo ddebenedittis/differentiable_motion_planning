@@ -16,7 +16,7 @@ from dimp.utils.disp import gen_arrow_head_marker, init_matplotlib
 from dimp.utils.voronoi_task import BoundedVoronoi
 
 
-def plot_colour_line(x, y, cmap='viridis', alpha=0.9, lw=2.0, dash_on=5, dash_off=3):
+def plot_colour_line(x, y, cmap='plasma', alpha=0.9, lw=2.0, dash_on=5, dash_off=3):
     """
     Plot a coloured line with a dashed effect by making some segments transparent.
 

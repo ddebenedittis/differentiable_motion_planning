@@ -19,6 +19,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle, ConnectionPatch
 import numpy as np
 
 from stiff_sys_prob import (
@@ -67,6 +68,74 @@ METHOD_CONFIGS: list[MethodConfig] = [
 # Stiff System Trajectory Plot
 # ============================================================================ #
 
+def _add_zoom_inset(parent_ax, fig, x_data, y_data, color, *,
+                     zoom_xlim, loc, time_lines=None):
+    """Draw a zoom inset on parent_ax replotting (x_data, y_data) in zoom_xlim."""
+    inset_bg = Rectangle(
+        (loc[0], loc[1]), loc[2], loc[3],
+        transform=parent_ax.transAxes,
+        facecolor='white', edgecolor='none', alpha=0.85, zorder=15,
+    )
+    parent_ax.add_patch(inset_bg)
+
+    axins = parent_ax.inset_axes(loc)
+    axins.set_zorder(20)
+    axins.set_facecolor('none')
+    axins.plot(x_data, y_data, color=color)
+
+    if time_lines is not None:
+        for t_val in time_lines:
+            if zoom_xlim[0] <= t_val <= zoom_xlim[1]:
+                axins.axvline(t_val, color='gray', linestyle='-',
+                              alpha=0.08, linewidth=0.5)
+
+    axins.set_xlim(zoom_xlim)
+
+    x_arr = np.asarray(x_data)
+    y_arr = np.asarray(y_data)
+    mask = (x_arr >= zoom_xlim[0]) & (x_arr <= zoom_xlim[1])
+    if mask.any():
+        idx = np.where(mask)[0]
+        lo = max(0, idx.min() - 1)
+        hi = min(len(x_arr), idx.max() + 2)
+        y_window = y_arr[lo:hi]
+        y_lo, y_hi = float(np.min(y_window)), float(np.max(y_window))
+        pad = 0.05 * (y_hi - y_lo) if y_hi > y_lo else 0.5 * max(abs(y_lo), 1.0)
+        axins.set_ylim(y_lo - pad, y_hi + pad)
+
+    for spine in axins.spines.values():
+        spine.set_edgecolor('black')
+        spine.set_linewidth(1.0)
+    axins.tick_params(labelsize=8)
+
+    main_ylim = parent_ax.get_ylim()
+    source_rect = Rectangle(
+        (zoom_xlim[0], main_ylim[0]),
+        zoom_xlim[1] - zoom_xlim[0],
+        main_ylim[1] - main_ylim[0],
+        edgecolor='black', facecolor='none',
+        linewidth=1.2, linestyle='--', zorder=5, clip_on=False,
+    )
+    parent_ax.add_patch(source_rect)
+
+    con_top = ConnectionPatch(
+        xyA=(zoom_xlim[1], main_ylim[1]), xyB=(0, 1),
+        coordsA='data', coordsB='axes fraction',
+        axesA=parent_ax, axesB=axins,
+        color='black', linewidth=1.0, linestyle='--', zorder=21,
+    )
+    con_bot = ConnectionPatch(
+        xyA=(zoom_xlim[1], main_ylim[0]), xyB=(0, 0),
+        coordsA='data', coordsB='axes fraction',
+        axesA=parent_ax, axesB=axins,
+        color='black', linewidth=1.0, linestyle='--', zorder=21,
+    )
+    fig.add_artist(con_top)
+    fig.add_artist(con_bot)
+
+    return axins
+
+
 def plot_stiff_sys_trajectory(dts, n, *, sol=None, s_arr=None, u_arr=None,
                                title=None, results_dir=None, filename=None,
                                show=False):
@@ -104,11 +173,17 @@ def plot_stiff_sys_trajectory(dts, n, *, sol=None, s_arr=None, u_arr=None,
                        linewidth=0.5)
 
     # x1 (fast, tau=0.1s)
-    axs[0, 0].plot(times, s_arr[:, 0])
+    line_x1, = axs[0, 0].plot(times, s_arr[:, 0])
     axs[0, 0].axhline(0, color='gray', linestyle='--', alpha=0.5)
     axs[0, 0].set(xlabel='Time [s]', ylabel=r'$x_1$',
                    title=r'$x_1$ (fast, $\tau$=0.1s)')
     _add_timestep_lines(axs[0, 0])
+    _add_zoom_inset(
+        axs[0, 0], fig, times, s_arr[:, 0], line_x1.get_color(),
+        zoom_xlim=(0.0, 0.5),
+        loc=[0.40, 0.08, 0.55, 0.55],
+        time_lines=times,
+    )
 
     # x2 (medium, tau=10s)
     axs[0, 1].plot(times, s_arr[:, 1])
@@ -125,13 +200,19 @@ def plot_stiff_sys_trajectory(dts, n, *, sol=None, s_arr=None, u_arr=None,
     _add_timestep_lines(axs[0, 2])
 
     # Input u(t)
-    axs[1, 0].plot(times, u_arr_plot.flatten())
+    line_u, = axs[1, 0].plot(times, u_arr_plot.flatten())
     axs[1, 0].axhline(u_max, color='r', linestyle='--', alpha=0.5,
                        label=r'$\pm u_{\max}$')
     axs[1, 0].axhline(-u_max, color='r', linestyle='--', alpha=0.5)
     axs[1, 0].set(xlabel='Time [s]', ylabel='u', title='Input')
     axs[1, 0].legend(fontsize=7)
     _add_timestep_lines(axs[1, 0])
+    _add_zoom_inset(
+        axs[1, 0], fig, times, u_arr_plot.flatten(), line_u.get_color(),
+        zoom_xlim=(0.0, 0.5),
+        loc=[0.40, 0.40, 0.55, 0.55],
+        time_lines=times,
+    )
 
     # Timestep distribution
     axs[1, 1].plot(times[1:], dts)

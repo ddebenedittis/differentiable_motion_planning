@@ -9,7 +9,8 @@ from enum import Enum
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from matplotlib.colors import Normalize
+from matplotlib.colors import LogNorm, Normalize
+from matplotlib.patches import Rectangle, ConnectionPatch
 
 
 # ============================================================================ #
@@ -908,32 +909,146 @@ def plot_timegrid(deltas, x=None, ax=None, ylabel=None, title=None):
         ax.set_title(title)
 
 
-def plot_colored(deltas, x, ax=None):
-    """Plot piecewise-constant signal with color indicating timestep duration."""
-    times = np.cumsum(deltas)
+def _resolve_cmap_norm(deltas, cmap, norm):
+    cmap = plt.get_cmap(cmap) if isinstance(cmap, str) else cmap
+    if isinstance(norm, str):
+        if norm == "log":
+            norm = LogNorm(vmin=np.min(deltas), vmax=np.max(deltas))
+        elif norm == "linear":
+            norm = Normalize(vmin=np.min(deltas), vmax=np.max(deltas))
+        else:
+            raise ValueError(f"Unknown norm {norm!r}; use 'linear' or 'log'")
+    return cmap, norm
 
-    cmap = plt.get_cmap("viridis")
-    norm = Normalize(vmin=np.min(deltas), vmax=np.max(deltas))
 
-    if ax is None:
-        fig = plt.figure()
-        ax = plt.gca()
-
+def _draw_zoh_segments(ax, times, x, deltas, cmap, norm):
+    """Draw piecewise-constant ZOH segments colored by per-step deltas."""
     for i in range(len(x) - 1):
         ax.hlines(x[i], times[i], times[i + 1],
                   colors=cmap(norm(deltas[i + 1])), linewidth=2)
         ax.vlines(times[i + 1], x[i], x[i + 1],
                   colors=cmap(norm(deltas[i + 1])), linewidth=1)
 
+
+def plot_colored(deltas, x, ax=None, cmap="plasma", norm="linear"):
+    """Plot piecewise-constant signal with color indicating timestep duration.
+
+    Args:
+        deltas: timestep durations
+        x: piecewise-constant signal values
+        ax: optional matplotlib axis
+        cmap: colormap name or Colormap instance (default "plasma")
+        norm: "linear" / "log", or a matplotlib Normalize instance
+            (default "linear")
+    """
+    times = np.cumsum(deltas)
+    cmap, norm = _resolve_cmap_norm(deltas, cmap, norm)
+
+    if ax is None:
+        fig = plt.figure()
+        ax = plt.gca()
+
+    _draw_zoh_segments(ax, times, x, deltas, cmap, norm)
+
     ax.set_xlabel("Time")
     ax.set_ylabel("Input")
 
     sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
-    cbar = plt.colorbar(sm, ax=ax)
+    cbar = plt.colorbar(sm, ax=ax, location="bottom")
     cbar.set_label("deltas")
 
     return ax
+
+
+_ZOOM_ACCENT_COLOR = '#404040'  # dark grey for inset spines / source rect / connectors / title
+
+
+def add_zoom_inset(parent_ax, fig, *, zoom_xlim, loc, draw_fn=None,
+                    time_lines=None, x_for_ylim=None, y_for_ylim=None,
+                    bg_alpha=0.85, accent_color=_ZOOM_ACCENT_COLOR,
+                    label="Zoom"):
+    """Draw a zoom inset on `parent_ax` of x-range `zoom_xlim`.
+
+    `draw_fn(axins)` should replot the data into the inset axes (this lets
+    callers reuse whichever rendering they used on the parent — single-color
+    line, multi-line, ZOH segments — so colors are preserved).
+
+    `x_for_ylim`/`y_for_ylim`: optional arrays. When given, the inset's
+    y-limits are computed from data within `zoom_xlim` (with one neighbor on
+    each side and 5% padding) so reference lines on the parent (e.g., bounds
+    far from the data) don't squash the zoom.
+    """
+    inset_bg = Rectangle(
+        (loc[0], loc[1]), loc[2], loc[3],
+        transform=parent_ax.transAxes,
+        facecolor='white', edgecolor='none', alpha=bg_alpha, zorder=15,
+    )
+    parent_ax.add_patch(inset_bg)
+
+    axins = parent_ax.inset_axes(loc)
+    axins.set_zorder(20)
+    axins.set_facecolor('none')
+
+    if draw_fn is not None:
+        draw_fn(axins)
+
+    if time_lines is not None:
+        for t_val in time_lines:
+            if zoom_xlim[0] <= t_val <= zoom_xlim[1]:
+                axins.axvline(t_val, color='gray', linestyle='-',
+                              alpha=0.08, linewidth=0.5)
+
+    axins.set_xlim(zoom_xlim)
+
+    if x_for_ylim is not None and y_for_ylim is not None:
+        x_arr = np.asarray(x_for_ylim)
+        y_arr = np.asarray(y_for_ylim)
+        mask = (x_arr >= zoom_xlim[0]) & (x_arr <= zoom_xlim[1])
+        if mask.any():
+            idx = np.where(mask)[0]
+            lo = max(0, idx.min() - 1)
+            hi = min(len(x_arr), idx.max() + 2)
+            y_window = y_arr[lo:hi]
+            y_lo = float(np.min(y_window))
+            y_hi = float(np.max(y_window))
+            pad = 0.05 * (y_hi - y_lo) if y_hi > y_lo else 0.5 * max(abs(y_lo), 1.0)
+            axins.set_ylim(y_lo - pad, y_hi + pad)
+
+    for spine in axins.spines.values():
+        spine.set_edgecolor(accent_color)
+        spine.set_linewidth(1.0)
+    axins.tick_params(labelsize=8, colors=accent_color)
+
+    if label:
+        axins.set_title(label, fontsize=8, color=accent_color, pad=2)
+
+    main_ylim = parent_ax.get_ylim()
+    source_rect = Rectangle(
+        (zoom_xlim[0], main_ylim[0]),
+        zoom_xlim[1] - zoom_xlim[0],
+        main_ylim[1] - main_ylim[0],
+        edgecolor=accent_color, facecolor='none',
+        linewidth=1.2, linestyle='--', zorder=5, clip_on=False,
+    )
+    parent_ax.add_patch(source_rect)
+
+    con_top = ConnectionPatch(
+        xyA=(zoom_xlim[1], main_ylim[1]), xyB=(0, 1),
+        coordsA='data', coordsB='axes fraction',
+        axesA=parent_ax, axesB=axins,
+        color=accent_color, linewidth=1.0, linestyle='--', zorder=21,
+    )
+    con_bot = ConnectionPatch(
+        xyA=(zoom_xlim[1], main_ylim[0]), xyB=(0, 0),
+        coordsA='data', coordsB='axes fraction',
+        axesA=parent_ax, axesB=axins,
+        color=accent_color, linewidth=1.0, linestyle='--', zorder=21,
+    )
+    fig.add_artist(con_top)
+    fig.add_artist(con_bot)
+
+    return axins
 
 
 def _extract_dts(sol, history, n, sol_method):
@@ -948,7 +1063,9 @@ def _extract_dts(sol, history, n, sol_method):
         raise ValueError(f"Unknown sol_method {sol_method}")
 
 
-def plot_training_res(sol, history, n, sol_method):
+def plot_training_res(sol, history, n, sol_method, cmap="plasma", norm="linear",
+                       zoom_xlim=None, zoom_loc_state=None,
+                       zoom_loc_input=None):
     """Plot training results (2x2 grid): loss, timesteps, state, colored input.
 
     Args:
@@ -956,6 +1073,14 @@ def plot_training_res(sol, history, n, sol_method):
         history: list of dicts with 'loss' and 'dts' keys
         n: number of timesteps
         sol_method: 1 for aux (dts in sol), 2 for rep/zoh (dts in history)
+        cmap: colormap for the colored-input subplot (default "plasma")
+        norm: "linear" / "log" or a Normalize instance (default "linear")
+        zoom_xlim: optional (t_lo, t_hi). When given, adds zoom insets on the
+            state and input subplots (e.g., (0.0, 0.5) for stiff systems).
+        zoom_loc_state: inset [x, y, w, h] for the state subplot (default
+            bottom-right).
+        zoom_loc_input: inset [x, y, w, h] for the input subplot (default
+            top-right).
     """
     s_arr = np.array([s.detach().numpy().tolist() for s in sol[0:n]])
     u_arr = np.array([u.detach().numpy().tolist() for u in sol[n:2 * n]])
@@ -973,7 +1098,36 @@ def plot_training_res(sol, history, n, sol_method):
     ax[0, 1].set_title("Timesteps Evolution")
 
     plot_timegrid(d_arr, s_arr, ax[1, 0], ylabel="State", title="State Evolution")
-    plot_colored(d_arr, u_arr, ax[1, 1])
+    plot_colored(d_arr, u_arr, ax[1, 1], cmap=cmap, norm=norm)
+
+    if zoom_xlim is not None:
+        times_state_input = np.cumsum(d_arr)
+        if zoom_loc_state is None:
+            zoom_loc_state = [0.40, 0.08, 0.55, 0.55]  # bottom-right
+        if zoom_loc_input is None:
+            zoom_loc_input = [0.40, 0.40, 0.55, 0.55]  # top-right
+
+        # State inset: replot multi-line state with default color cycle
+        # so colors match the parent.
+        add_zoom_inset(
+            ax[1, 0], fig,
+            zoom_xlim=zoom_xlim, loc=zoom_loc_state,
+            draw_fn=lambda a: a.plot(times_state_input, s_arr),
+            time_lines=times_state_input,
+            x_for_ylim=times_state_input, y_for_ylim=s_arr,
+        )
+
+        # Input inset: replot ZOH segments with the same cmap/norm.
+        cmap_r, norm_r = _resolve_cmap_norm(d_arr, cmap, norm)
+        add_zoom_inset(
+            ax[1, 1], fig,
+            zoom_xlim=zoom_xlim, loc=zoom_loc_input,
+            draw_fn=lambda a: _draw_zoh_segments(
+                a, times_state_input, u_arr, d_arr, cmap_r, norm_r,
+            ),
+            time_lines=times_state_input,
+            x_for_ylim=times_state_input, y_for_ylim=u_arr,
+        )
 
     fig.set_constrained_layout(True)
 
@@ -982,7 +1136,10 @@ def plot_training_res(sol, history, n, sol_method):
 # I/O
 # ============================================================================ #
 
-def save_training_res(out_dir, exp_name, sol, history, n, sol_method):
+def save_training_res(out_dir, exp_name, sol, history, n, sol_method,
+                      cmap="plasma", norm="linear",
+                      zoom_xlim=None, zoom_loc_state=None,
+                      zoom_loc_input=None):
     """Save training result plots to out_dir/exp_name/.
 
     Args:
@@ -992,6 +1149,12 @@ def save_training_res(out_dir, exp_name, sol, history, n, sol_method):
         history: training history
         n: number of timesteps
         sol_method: 1 for aux, 2 for rep/zoh
+        cmap: colormap for the colored-input plot
+        norm: "linear" / "log" or a Normalize instance
+        zoom_xlim: optional (t_lo, t_hi). When given, adds a zoom inset to
+            the saved state.pdf and input.pdf figures.
+        zoom_loc_state: inset [x, y, w, h] for state.pdf (default bottom-right).
+        zoom_loc_input: inset [x, y, w, h] for input.pdf (default top-right).
     """
     exp_dir = os.path.join(out_dir, exp_name)
     os.makedirs(exp_dir, exist_ok=True)
@@ -1000,8 +1163,26 @@ def save_training_res(out_dir, exp_name, sol, history, n, sol_method):
     u_arr = np.array([u.detach().numpy().tolist() for u in sol[n:2 * n]])
     d_arr = _extract_dts(sol, history, n, sol_method)
 
+    if zoom_xlim is not None:
+        if zoom_loc_state is None:
+            zoom_loc_state = [0.40, 0.08, 0.55, 0.55]
+        if zoom_loc_input is None:
+            zoom_loc_input = [0.40, 0.40, 0.55, 0.55]
+        times_si = np.cumsum(d_arr)
+
     fig, ax = plt.subplots(1, 1, figsize=(3.2, 3.2))
-    plot_colored(d_arr, u_arr, ax)
+    plot_colored(d_arr, u_arr, ax, cmap=cmap, norm=norm)
+    if zoom_xlim is not None:
+        cmap_r, norm_r = _resolve_cmap_norm(d_arr, cmap, norm)
+        add_zoom_inset(
+            ax, fig,
+            zoom_xlim=zoom_xlim, loc=zoom_loc_input,
+            draw_fn=lambda a: _draw_zoh_segments(
+                a, times_si, u_arr, d_arr, cmap_r, norm_r,
+            ),
+            time_lines=times_si,
+            x_for_ylim=times_si, y_for_ylim=u_arr,
+        )
     fig.savefig(f"{exp_dir}/input.pdf", bbox_inches='tight')
     plt.close(fig)
 
@@ -1018,6 +1199,66 @@ def save_training_res(out_dir, exp_name, sol, history, n, sol_method):
     ax.set_ylabel("Loss")
     fig.savefig(f"{exp_dir}/loss.pdf", bbox_inches='tight')
     plt.close(fig)
+
+    fig, ax = plt.subplots(1, 1, figsize=(3.2, 3.2))
+    plot_timegrid(d_arr, s_arr, ax, ylabel="State")
+    if zoom_xlim is not None:
+        add_zoom_inset(
+            ax, fig,
+            zoom_xlim=zoom_xlim, loc=zoom_loc_state,
+            draw_fn=lambda a: a.plot(times_si, s_arr),
+            time_lines=times_si,
+            x_for_ylim=times_si, y_for_ylim=s_arr,
+        )
+    fig.savefig(f"{exp_dir}/state.pdf", bbox_inches='tight')
+    plt.close(fig)
+
+
+def save_radapt_diagnostics(out_dir, exp_name, history, n,
+                            color_accepted="#0072B2",
+                            color_rejected="#E69F00"):
+    """Save r-adapt move outcomes and accepted move participation as PDFs.
+
+    Produces move_outcomes.pdf and accepted_move_participation.pdf inside
+    out_dir/exp_name/.  Returns False (and does nothing) when the history
+    contains no r-adapt attempts.
+    """
+    attempts = [h for h in history if h.get("radapt_attempted")]
+    if not attempts:
+        return False
+
+    exp_dir = os.path.join(out_dir, exp_name)
+    os.makedirs(exp_dir, exist_ok=True)
+
+    eps_attempt = np.array([h["epoch"] for h in attempts])
+    dLs = np.array([h["radapt_dL"] for h in attempts])
+    accepted = np.array([h["radapt_accepted"] for h in attempts])
+
+    fig, ax = plt.subplots(1, 1, figsize=(3.2, 3.2))
+    ax.scatter(eps_attempt[accepted], dLs[accepted],
+               color=color_accepted, marker="o", label="accepted")
+    ax.scatter(eps_attempt[~accepted], dLs[~accepted],
+               color=color_rejected, marker="x", label="rejected")
+    ax.axhline(0, color="gray", lw=0.5)
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel(r"$\Delta L$")
+    ax.legend(fontsize=7)
+    fig.savefig(f"{exp_dir}/move_outcomes.pdf", bbox_inches='tight')
+    plt.close(fig)
+
+    js = np.array([h["radapt_j"] for h in attempts if h["radapt_accepted"]])
+    is_ = np.array([h["radapt_i"] for h in attempts if h["radapt_accepted"]])
+    bins = np.arange(-0.5, n + 0.5, 1)
+    fig, ax = plt.subplots(1, 1, figsize=(3.2, 3.2))
+    ax.hist([js, is_], bins=bins, label=["merge j", "split i"], stacked=False)
+    ax.set_xlabel("Interval index")
+    ax.set_ylabel("Count")
+    ax.legend(fontsize=7)
+    fig.savefig(f"{exp_dir}/accepted_move_participation.pdf",
+                bbox_inches='tight')
+    plt.close(fig)
+
+    return True
 
 
 def save_pickle(out_dir, name, data):
@@ -1287,7 +1528,8 @@ def load_loss_results(data_dir, loss_names=None, suffix=""):
     return results
 
 
-def plot_method_results(name, result, results_dir, show=False):
+def plot_method_results(name, result, results_dir, show=False,
+                        cmap="plasma", norm="linear"):
     """Plot training results for a single method (2x2 grid per sub-method)."""
     sol_dict = result["sol"]
     history = result["history"]
@@ -1302,29 +1544,41 @@ def plot_method_results(name, result, results_dir, show=False):
             print(f"  No history for {name}/{method}, skipping")
             continue
 
-        plot_training_res(sol, hist_m, n_method, sol_method=sol_method)
+        plot_training_res(sol, hist_m, n_method, sol_method=sol_method,
+                          cmap=cmap, norm=norm)
         plt.suptitle(f"{name}: {method}")
 
         if results_dir:
             _key = method.replace(' ', '_')
             save_training_res(results_dir, f"{name}_{_key}", sol, hist_m,
-                              n_method, sol_method)
+                              n_method, sol_method, cmap=cmap, norm=norm)
 
         if not show:
             plt.close('all')
 
 
-def plot_loss_results(loss_name, result, results_dir, show=False):
+def plot_loss_results(loss_name, result, results_dir, show=False,
+                      cmap="plasma", norm="linear",
+                      zoom_xlim=None, zoom_loc_state=None,
+                      zoom_loc_input=None):
     """Plot training results for a single loss (2x2 grid)."""
     sol = result["sol"]
     history = result["history"]
     n = result["n"]
 
-    plot_training_res(sol, history, n, sol_method=2)
+    plot_training_res(
+        sol, history, n, sol_method=2, cmap=cmap, norm=norm,
+        zoom_xlim=zoom_xlim, zoom_loc_state=zoom_loc_state,
+        zoom_loc_input=zoom_loc_input,
+    )
     plt.suptitle(loss_name)
 
     if results_dir:
-        save_training_res(results_dir, loss_name, sol, history, n, sol_method=2)
+        save_training_res(results_dir, loss_name, sol, history, n, sol_method=2,
+                          cmap=cmap, norm=norm,
+                          zoom_xlim=zoom_xlim,
+                          zoom_loc_state=zoom_loc_state,
+                          zoom_loc_input=zoom_loc_input)
 
     if not show:
         plt.close('all')

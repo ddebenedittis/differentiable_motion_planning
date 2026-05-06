@@ -48,7 +48,7 @@ def gen_arrow_head_marker(rot):
     return arrow_head_marker, scale
 
 
-def init_matplotlib(palette: str = 'okabe-ito'):
+def init_matplotlib(palette: str = 'matlab'):
     colors = get_colors(palette)
 
     lines = ['-', '--', '-', '--', '-', '--', '-', '--', '-', '--']
