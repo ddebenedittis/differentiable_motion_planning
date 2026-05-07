@@ -76,7 +76,7 @@ def init_matplotlib(palette: str = 'matlab'):
 
     plt.rcParams['figure.constrained_layout.use'] = True
     
-def get_colors(palette: str = 'okabe-ito'):
+def get_colors(palette: str = 'matlab'):
     """Get a list of colors based on the specified palette."""
     if palette == 'okabe-ito':
         return ['#E69F00', '#56B4E9', '#009E73', '#F0E442', '#0072B2', '#D55E00', '#CC79A7', '#000000']

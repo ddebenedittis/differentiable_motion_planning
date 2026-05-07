@@ -9,9 +9,15 @@ and returns everything the caller needs, including a CvxpyLayer when applicable.
 No error coordinates are needed since the goal state is the origin.
 """
 
+import os
+import sys
+
 import cvxpy as cp
 from cvxpylayers.torch import CvxpyLayer
 import numpy as np
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from utils import ZOHParamSpec  # noqa: E402
 
 # ============================================================================ #
 # System Constants (Stiff System LTI)
@@ -143,12 +149,13 @@ def create_stiff_sys_rep_clqr(n, s0, A, B, Q, R, u_max, x_max):
     return problem, layer, s_vars, u_vars, dts_param
 
 
-def create_stiff_sys_zoh_clqr(n, s0, n_s, n_u, u_max, x_max):
+def create_stiff_sys_zoh_clqr(n, s0, n_s, n_u, u_max, x_max,
+                              A_sys=None, B_sys=None, Q_sys=None, R_sys=None):
     """ZOH3 method: exact ZOH dynamics + exact integrated quadratic cost.
 
-    The Cholesky factor L of the cost matrix W is split into Lx (state columns)
-    and Lu (input columns) so the expression Lx @ x_k + Lu @ u_k avoids
-    cp.hstack on 1-D variables.
+    Uses ZOHParamSpec to declare structure-aware parameter shapes. The stiff
+    system is jointly diagonal in A and Q, so detection lands in the
+    fully-diagonal fast path of the block-diagonal tier.
 
     Args:
         n: number of timesteps
@@ -157,31 +164,35 @@ def create_stiff_sys_zoh_clqr(n, s0, n_s, n_u, u_max, x_max):
         n_u: input dimension
         u_max: input constraint bound (scalar)
         x_max: dict {state_index: bound} for state constraints, or None
+        A_sys, B_sys, Q_sys, R_sys: continuous-time matrices used for structure
+            detection. Default to the module-level constants. Override when
+            building a problem for a system that differs from the module
+            defaults (e.g., the n_states sweep in stiff_sys_times.py).
 
     Returns:
         problem: cp.Problem
         layer: CvxpyLayer
         s_vars: list of n+1 state variables
         u_vars: list of n input variables
-        Aps: list of n Ad parameter matrices
-        Bps: list of n Bd parameter matrices
-        Lxs: list of n Lx parameter matrices
-        Lus: list of n Lu parameter matrices
+        spec: ZOHParamSpec used to declare the per-step parameters
     """
+    A_sys = A if A_sys is None else A_sys
+    B_sys = B if B_sys is None else B_sys
+    Q_sys = Q if Q_sys is None else Q_sys
+    R_sys = R if R_sys is None else R_sys
+    spec = ZOHParamSpec(A_sys, B_sys, Q_sys, R_sys)
+
     s_vars = [s0] + [cp.Variable(n_s, name=f"s_{i}") for i in range(n)]
     u_vars = [cp.Variable(n_u, name=f"u_{i}") for i in range(n)]
-    Aps = [cp.Parameter((n_s, n_s), name=f"Ad3_{k}") for k in range(n)]
-    Bps = [cp.Parameter((n_s, n_u), name=f"Bd3_{k}") for k in range(n)]
-    Lxs = [cp.Parameter((n_s + n_u, n_s), name=f"Lx3_{k}") for k in range(n)]
-    Lus = [cp.Parameter((n_s + n_u, n_u), name=f"Lu3_{k}") for k in range(n)]
+    step_params = [spec.make_step_params(k) for k in range(n)]
 
     objective = cp.sum([
-        cp.sum_squares(Lxs[k] @ s_vars[k] + Lus[k] @ u_vars[k])
+        spec.cost_expr(s_vars[k], u_vars[k], step_params[k])
         for k in range(n)
     ])
 
     constraints = [
-        s_vars[k + 1] == Aps[k] @ s_vars[k] + Bps[k] @ u_vars[k]
+        s_vars[k + 1] == spec.dynamics_expr(s_vars[k], u_vars[k], step_params[k])
         for k in range(n)
     ] + [
         cp.abs(u_vars[k]) <= u_max for k in range(n)
@@ -199,8 +210,8 @@ def create_stiff_sys_zoh_clqr(n, s0, n_s, n_u, u_max, x_max):
 
     layer = CvxpyLayer(
         problem,
-        parameters=Aps + Bps + Lxs + Lus,
+        parameters=spec.layer_parameters(step_params),
         variables=s_vars[1:] + u_vars,
     )
 
-    return problem, layer, s_vars, u_vars, Aps, Bps, Lxs, Lus
+    return problem, layer, s_vars, u_vars, spec

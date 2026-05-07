@@ -58,23 +58,27 @@ DEFAULT_LR = {"rep": 1e-2, "zoh": 1e-2}
 # ============================================================================ #
 
 def _create_layer(method_name, n):
-    """Create the CvxpyLayer for a given method."""
+    """Create the CvxpyLayer for a given method.
+
+    Returns (layer, spec) where spec is the ZOHParamSpec for the zoh method
+    and None otherwise.
+    """
     if method_name == "rep":
         _, layer, _, _, _ = create_invpend_rep_clqr(
             n, s0, A, B, Q, R, u_max, x_max, s_goal,
         )
-        return layer
+        return layer, None
     elif method_name == "zoh":
-        _, layer, _, _, _, _, _, _ = create_invpend_zoh_clqr(
+        _, layer, _, _, spec = create_invpend_zoh_clqr(
             n, s0, n_s, n_u, u_max, x_max, s_goal,
         )
-        return layer
+        return layer, spec
     else:
         raise ValueError(f"Unknown method: {method_name}")
 
 
-def _compute_qp_params_and_solve(method_name, layer, dts_torch, n, A_t, B_t,
-                                  Q_t, R_t):
+def _compute_qp_params_and_solve(method_name, layer, spec, dts_torch, n,
+                                  A_t, B_t, Q_t, R_t):
     """Compute QP parameters from dts and solve via the layer.
 
     Returns:
@@ -85,17 +89,12 @@ def _compute_qp_params_and_solve(method_name, layer, dts_torch, n, A_t, B_t,
         return layer(dts_torch), None
 
     elif method_name == "zoh":
-        Ad_list, Bd_list, Lx_list, Lu_list, W_list = [], [], [], [], []
+        packed_steps, W_list = [], []
         for k in range(n):
             Ad_k, Bd_k, W_k = zoh_cost_matrices(dts_torch[k], A_t, B_t, Q_t, R_t)
-            Ad_list.append(Ad_k)
-            Bd_list.append(Bd_k)
             W_list.append(W_k)
-            L_k = torch.linalg.cholesky(W_k)
-            LT_k = L_k.T
-            Lx_list.append(LT_k[:, :n_s])
-            Lu_list.append(LT_k[:, n_s:])
-        return layer(*Ad_list, *Bd_list, *Lx_list, *Lu_list), W_list
+            packed_steps.append(spec.pack_step(Ad_k, Bd_k, W_k))
+        return layer(*spec.flatten_for_layer(packed_steps)), W_list
 
     raise ValueError(f"Unknown method: {method_name}")
 
@@ -154,7 +153,7 @@ def train_softmax_method(method_name, n, n_epochs, lr, data_dir):
     theta = torch.nn.Parameter(torch.ones(n, 1, dtype=dtype))
     optim = torch.optim.Adam([theta], lr=lr)
 
-    layer = _create_layer(method_name, n)
+    layer, spec = _create_layer(method_name, n)
 
     history = []
     sol_dict = {}
@@ -166,7 +165,7 @@ def train_softmax_method(method_name, n, n_epochs, lr, data_dir):
 
             dts_torch = theta_2_dt(theta, T, n)
             sol_raw, W_list = _compute_qp_params_and_solve(
-                method_name, layer, dts_torch, n, A_t, B_t, Q_t, R_t,
+                method_name, layer, spec, dts_torch, n, A_t, B_t, Q_t, R_t,
             )
             sol_dict[internal_key] = sol_raw
 
@@ -226,7 +225,7 @@ def train_one_loss(loss_name, n, n_epochs, lr, lambda0, use_balancing, data_dir,
     theta = torch.nn.Parameter(torch.ones(n, 1, dtype=dtype))
     optim = torch.optim.Adam([theta], lr=lr)
 
-    _, layer, _, _, _, _, _, _ = create_invpend_zoh_clqr(
+    _, layer, _, _, spec = create_invpend_zoh_clqr(
         n, s0, n_s, n_u, u_max, x_max, s_goal,
     )
 
@@ -244,7 +243,7 @@ def train_one_loss(loss_name, n, n_epochs, lr, lambda0, use_balancing, data_dir,
             dts_torch = theta_2_dt(theta, T, n)
 
             # Compute discretization parameters (Exact ZOH)
-            Ad_list, Bd_list, Lx_list, Lu_list, W_list = [], [], [], [], []
+            packed_steps, Ad_list, Bd_list, W_list = [], [], [], []
             for k in range(n):
                 Ad_k, Bd_k, W_k = zoh_cost_matrices(
                     dts_torch[k], A_t, B_t, Q_t, R_t,
@@ -252,14 +251,10 @@ def train_one_loss(loss_name, n, n_epochs, lr, lambda0, use_balancing, data_dir,
                 Ad_list.append(Ad_k)
                 Bd_list.append(Bd_k)
                 W_list.append(W_k)
-
-                L_k = torch.linalg.cholesky(W_k)
-                LT_k = L_k.T
-                Lx_list.append(LT_k[:, :n_s])
-                Lu_list.append(LT_k[:, n_s:])
+                packed_steps.append(spec.pack_step(Ad_k, Bd_k, W_k))
 
             # Solve QP
-            sol = layer(*Ad_list, *Bd_list, *Lx_list, *Lu_list)
+            sol = layer(*spec.flatten_for_layer(packed_steps))
 
             # Extract error states and inputs
             states = [e0_t] + [sol[k] for k in range(n)]
@@ -401,13 +396,14 @@ def train_custom_loss(loss_weights, n=None, n_epochs=200, lr=3e-2, detach="none"
     optim = torch.optim.Adam([theta], lr=lr)
 
     if discretization == "zoh":
-        _, layer, _, _, _, _, _, _ = create_invpend_zoh_clqr(
+        _, layer, _, _, spec = create_invpend_zoh_clqr(
             n, s0, n_s, n_u, u_max, x_max, s_goal,
         )
     else:
         _, layer, _, _, _ = create_invpend_rep_clqr(
             n, s0, A, B, Q, R, u_max, x_max, s_goal,
         )
+        spec = None
 
     disc_fn = zoh_cost_matrices if discretization == "zoh" else euler_matrices
 
@@ -428,7 +424,8 @@ def train_custom_loss(loss_weights, n=None, n_epochs=200, lr=3e-2, detach="none"
             dts_torch = theta_2_dt(theta_eff, T, n)
 
             # Compute discretization parameters
-            Ad_list, Bd_list, Lx_list, Lu_list, W_list = [], [], [], [], []
+            Ad_list, Bd_list, W_list = [], [], []
+            packed_steps = []
             for k in range(n):
                 Ad_k, Bd_k, W_k = disc_fn(
                     dts_torch[k], A_t, B_t, Q_t, R_t,
@@ -436,16 +433,12 @@ def train_custom_loss(loss_weights, n=None, n_epochs=200, lr=3e-2, detach="none"
                 Ad_list.append(Ad_k)
                 Bd_list.append(Bd_k)
                 W_list.append(W_k)
-
                 if discretization == "zoh":
-                    L_k = torch.linalg.cholesky(W_k)
-                    LT_k = L_k.T
-                    Lx_list.append(LT_k[:, :n_s])
-                    Lu_list.append(LT_k[:, n_s:])
+                    packed_steps.append(spec.pack_step(Ad_k, Bd_k, W_k))
 
             # Solve QP
             if discretization == "zoh":
-                sol = layer(*Ad_list, *Bd_list, *Lx_list, *Lu_list)
+                sol = layer(*spec.flatten_for_layer(packed_steps))
             else:
                 sol = layer(dts_torch)
 
