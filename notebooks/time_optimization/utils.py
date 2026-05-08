@@ -1,6 +1,7 @@
 """General-purpose utilities for differentiable time optimization experiments."""
 
 import json
+import math
 import os
 import pickle
 import subprocess
@@ -11,6 +12,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from matplotlib.colors import LogNorm, Normalize
+from matplotlib.lines import Line2D
 from matplotlib.patches import Rectangle, ConnectionPatch
 
 
@@ -836,6 +838,169 @@ def apply_merge_split(theta_np, j, i):
     return new_flat.reshape(n, 1)
 
 
+class RAdaptDriver:
+    """Driver for r-adaptive merge/split moves with Metropolis acceptance.
+
+    Encapsulates the frequency/temperature schedules, RNG, and the
+    propose/apply/accept-or-reject cycle used inside training loops.
+    Each epoch the training loop calls `maybe_step(...)`, which returns a
+    dict of `radapt_*` fields ready to merge into a history entry.
+
+    The driver requires an `evaluate_fn(epoch) -> dict` callable that, when
+    invoked, returns at least `{"loss", "states", "inputs", "dts"}` from a
+    forward pass at the current `theta`.
+    """
+
+    NULL_FIELDS = {
+        "radapt_attempted": False, "radapt_accepted": None,
+        "radapt_j": None, "radapt_i": None,
+        "radapt_dL": None, "radapt_T": None,
+    }
+
+    def __init__(self, *, n_epochs, Q, R,
+                 enable=False, every=10, freq_schedule=None,
+                 importance="combined", beta=1.0,
+                 temp_schedule=("exp", 1.0, 0.01),
+                 warmup=20, cooldown=20, seed=None):
+        self.enable = bool(enable)
+        self.n_epochs = int(n_epochs)
+        self.Q = Q
+        self.R = R
+        self.every = int(every)
+        self.importance = importance
+        self.beta = float(beta)
+        self.warmup = int(warmup)
+        self.cooldown = int(cooldown)
+        self.rng = np.random.default_rng(seed)
+
+        self._temp_at = self._build_temp_schedule(temp_schedule)
+        self._freq_at = self._build_freq_schedule(freq_schedule)
+
+    def _build_temp_schedule(self, temp_schedule):
+        n_epochs = self.n_epochs
+        if temp_schedule is None:
+            def temp_at(epoch):
+                return 0.0
+            return temp_at
+
+        kind, T_start, T_end = temp_schedule
+        if kind not in ("linear", "exp"):
+            raise ValueError(
+                f"radapt temp_schedule kind must be 'linear' or 'exp', got '{kind}'")
+        if T_start <= 0 or T_end <= 0:
+            raise ValueError("radapt temperature endpoints must be positive")
+        if kind == "linear":
+            def temp_at(epoch):
+                if n_epochs <= 1:
+                    return float(T_end)
+                t = epoch / (n_epochs - 1)
+                return float(T_start + (T_end - T_start) * t)
+        else:
+            log_start = np.log(T_start)
+            log_end = np.log(T_end)
+            def temp_at(epoch):
+                if n_epochs <= 1:
+                    return float(T_end)
+                t = epoch / (n_epochs - 1)
+                return float(np.exp(log_start + (log_end - log_start) * t))
+        return temp_at
+
+    def _build_freq_schedule(self, freq_schedule):
+        if freq_schedule is None:
+            every = self.every
+            def freq_at(epoch):
+                return int(every)
+            return freq_at
+
+        f_start, f_end = freq_schedule
+        active_start = self.warmup
+        active_end = max(active_start, self.n_epochs - self.cooldown - 1)
+        def freq_at(epoch):
+            span = active_end - active_start
+            if span <= 0:
+                return max(1, int(f_end))
+            t = (epoch - active_start) / span
+            t = max(0.0, min(1.0, t))
+            return max(1, int(round(f_start + (f_end - f_start) * t)))
+        return freq_at
+
+    def _is_due(self, epoch):
+        if not self.enable:
+            return False
+        if not (self.warmup <= epoch < self.n_epochs - self.cooldown):
+            return False
+        every_now = self._freq_at(epoch)
+        if every_now <= 0:
+            return False
+        return (epoch - self.warmup) % every_now == 0
+
+    def maybe_step(self, epoch, theta, evaluate_fn, optim):
+        """If a move is due this epoch, attempt it and update `theta` in place.
+
+        Args:
+            epoch: current epoch index (0-based).
+            theta: torch.nn.Parameter holding softmax logits, shape (n, 1).
+            evaluate_fn: callable mapping epoch -> dict containing at least
+                {"loss", "states", "inputs", "dts"}.
+            optim: torch optimizer holding `theta`. Its state is cleared on
+                accept so stale momentum does not pull theta back.
+
+        Returns:
+            dict of `radapt_*` fields to merge into the history entry.
+        """
+        if not self._is_due(epoch):
+            return dict(self.NULL_FIELDS)
+
+        theta_snapshot = theta.detach().clone()
+        with torch.no_grad():
+            out_post = evaluate_fn(epoch)
+        loss_before = float(out_post["loss"].item())
+
+        eta_single, eta_pair = compute_importance(
+            out_post["states"], out_post["inputs"], out_post["dts"],
+            self.Q, self.R, mode=self.importance,
+        )
+        sel = select_merge_split(
+            eta_single, eta_pair, theta.detach().cpu().numpy(),
+            beta=self.beta, rng=self.rng,
+        )
+        if sel is None:
+            return dict(self.NULL_FIELDS)
+
+        j, i = sel
+        theta_new_np = apply_merge_split(
+            theta.detach().cpu().numpy(), j, i,
+        )
+        with torch.no_grad():
+            theta.copy_(torch.tensor(theta_new_np, dtype=theta.dtype))
+            out_after = evaluate_fn(epoch)
+        loss_after = float(out_after["loss"].item())
+
+        T_metro = self._temp_at(epoch)
+        dL = loss_after - loss_before
+        if dL <= 0:
+            accept = True
+        elif T_metro <= 1e-12:
+            accept = False
+        else:
+            accept = self.rng.random() < math.exp(-dL / T_metro)
+
+        if accept:
+            optim.state.clear()
+        else:
+            with torch.no_grad():
+                theta.copy_(theta_snapshot)
+
+        return {
+            "radapt_attempted": True,
+            "radapt_accepted": bool(accept),
+            "radapt_j": int(j),
+            "radapt_i": int(i),
+            "radapt_dL": float(dL),
+            "radapt_T": float(T_metro),
+        }
+
+
 # ============================================================================ #
 # Adaptive Gradient Balancing
 # ============================================================================ #
@@ -1066,7 +1231,7 @@ def _extract_dts(sol, history, n, sol_method):
 
 def plot_training_res(sol, history, n, sol_method, cmap="plasma", norm="linear",
                        zoom_xlim=None, zoom_loc_state=None,
-                       zoom_loc_input=None):
+                       zoom_loc_input=None, ct_sol=None):
     """Plot training results (2x2 grid): loss, timesteps, state, colored input.
 
     Args:
@@ -1082,6 +1247,10 @@ def plot_training_res(sol, history, n, sol_method, cmap="plasma", norm="linear",
             bottom-right).
         zoom_loc_input: inset [x, y, w, h] for the input subplot (default
             top-right).
+        ct_sol: optional dict with keys 'u_arr' and 'dts' giving a
+            uniformly-sampled CT reference input trajectory to overlay on the
+            colored-input subplot as a dashed grey line. When provided, a
+            legend is added.
     """
     s_arr = np.array([s.detach().numpy().tolist() for s in sol[0:n]])
     u_arr = np.array([u.detach().numpy().tolist() for u in sol[n:2 * n]])
@@ -1100,6 +1269,25 @@ def plot_training_res(sol, history, n, sol_method, cmap="plasma", norm="linear",
 
     plot_timegrid(d_arr, s_arr, ax[1, 0], ylabel="State", title="State Evolution")
     plot_colored(d_arr, u_arr, ax[1, 1], cmap=cmap, norm=norm)
+
+    if ct_sol is not None:
+        u_ct = np.asarray(ct_sol['u_arr']).flatten()
+        dts_ct = np.asarray(ct_sol['dts']).flatten()
+        n_ct = len(u_ct)
+        times_ct = np.concatenate(([0.0], np.cumsum(dts_ct)))
+        u_ct_step = np.concatenate((u_ct, u_ct[-1:]))
+        ax[1, 1].step(
+            times_ct, u_ct_step, where='post',
+            linestyle='--', color='grey', linewidth=1.0, zorder=3,
+        )
+        cmap_obj = plt.get_cmap(cmap) if isinstance(cmap, str) else cmap
+        legend_elements = [
+            Line2D([0], [0], color=cmap_obj(0.5), lw=2,
+                   label=f"Non uniform - {n} steps"),
+            Line2D([0], [0], color='grey', linestyle='--', lw=1.0,
+                   label=f"Uniform - {n_ct} steps"),
+        ]
+        ax[1, 1].legend(handles=legend_elements, fontsize=7, loc='best')
 
     if zoom_xlim is not None:
         times_state_input = np.cumsum(d_arr)
@@ -1561,8 +1749,13 @@ def plot_method_results(name, result, results_dir, show=False,
 def plot_loss_results(loss_name, result, results_dir, show=False,
                       cmap="plasma", norm="linear",
                       zoom_xlim=None, zoom_loc_state=None,
-                      zoom_loc_input=None):
-    """Plot training results for a single loss (2x2 grid)."""
+                      zoom_loc_input=None, ct_sol=None):
+    """Plot training results for a single loss (2x2 grid).
+
+    When ``ct_sol`` is provided (dict with 'u_arr' and 'dts'), the input
+    subplot also shows the dense uniform reference as a dashed grey line and
+    a legend distinguishing the two trajectories.
+    """
     sol = result["sol"]
     history = result["history"]
     n = result["n"]
@@ -1571,6 +1764,7 @@ def plot_loss_results(loss_name, result, results_dir, show=False,
         sol, history, n, sol_method=2, cmap=cmap, norm=norm,
         zoom_xlim=zoom_xlim, zoom_loc_state=zoom_loc_state,
         zoom_loc_input=zoom_loc_input,
+        ct_sol=ct_sol,
     )
     plt.suptitle(loss_name)
 

@@ -12,7 +12,6 @@ Usage:
 """
 
 import argparse
-import math
 import os
 import sys
 
@@ -31,17 +30,15 @@ from pann_prob import (
 from utils import (
     LOSS_REGISTRY,
     AdaptiveGradientBalancer,
+    RAdaptDriver,
     RunMode,
-    apply_merge_split,
     build_loss_kwargs,
-    compute_importance,
     euler_matrices,
     get_n_epochs,
     load_losses_config,
     pickle_name,
     resolve_loss_names,
     Ad_Bd_from_dt,
-    select_merge_split,
     theta_2_dt,
     zoh_cost_matrices,
     task_loss,
@@ -563,47 +560,15 @@ def train_custom_loss(loss_weights, n=None, n_epochs=200, lr=3e-2, detach="none"
 
     loss_fns = {name: LOSS_REGISTRY[name] for name in loss_weights}
 
-    if radapt_temp_schedule is None:
-        def temp_at(epoch):
-            return 0.0
-    else:
-        kind_T, T_start, T_end = radapt_temp_schedule
-        if kind_T not in ("linear", "exp"):
-            raise ValueError(
-                f"radapt_temp_schedule kind must be 'linear' or 'exp', got '{kind_T}'")
-        if T_start <= 0 or T_end <= 0:
-            raise ValueError("radapt temperature endpoints must be positive")
-        if kind_T == "linear":
-            def temp_at(epoch):
-                if n_epochs <= 1:
-                    return float(T_end)
-                t = epoch / (n_epochs - 1)
-                return float(T_start + (T_end - T_start) * t)
-        else:
-            log_T_start = np.log(T_start)
-            log_T_end = np.log(T_end)
-            def temp_at(epoch):
-                if n_epochs <= 1:
-                    return float(T_end)
-                t = epoch / (n_epochs - 1)
-                return float(np.exp(log_T_start + (log_T_end - log_T_start) * t))
-
-    if radapt_freq_schedule is None:
-        def freq_at(epoch):
-            return int(radapt_every)
-    else:
-        f_start, f_end = radapt_freq_schedule
-        active_start = radapt_warmup
-        active_end = max(active_start, n_epochs - radapt_cooldown - 1)
-        def freq_at(epoch):
-            span = active_end - active_start
-            if span <= 0:
-                return max(1, int(f_end))
-            t = (epoch - active_start) / span
-            t = max(0.0, min(1.0, t))
-            return max(1, int(round(f_start + (f_end - f_start) * t)))
-
-    rng = np.random.default_rng(radapt_seed)
+    radapt = RAdaptDriver(
+        n_epochs=n_epochs, Q=Q, R=R,
+        enable=radapt_enable, every=radapt_every,
+        freq_schedule=radapt_freq_schedule,
+        importance=radapt_importance, beta=radapt_beta,
+        temp_schedule=radapt_temp_schedule,
+        warmup=radapt_warmup, cooldown=radapt_cooldown,
+        seed=radapt_seed,
+    )
 
     def _evaluate(epoch_):
         """Forward QP + composite loss at the current theta."""
@@ -691,66 +656,7 @@ def train_custom_loss(loss_weights, n=None, n_epochs=200, lr=3e-2, detach="none"
             entry.update({f"loss_{name}": float(v.item())
                           for name, v in out["reg_losses"].items()})
 
-            radapt_fields = {
-                "radapt_attempted": False, "radapt_accepted": None,
-                "radapt_j": None, "radapt_i": None,
-                "radapt_dL": None, "radapt_T": None,
-            }
-
-            if (radapt_enable
-                    and radapt_warmup <= epoch < n_epochs - radapt_cooldown):
-                every_now = freq_at(epoch)
-                if every_now > 0 and (epoch - radapt_warmup) % every_now == 0:
-                    theta_snapshot = theta.detach().clone()
-                    with torch.no_grad():
-                        out_post = _evaluate(epoch)
-                    loss_before = float(out_post["loss"].item())
-
-                    eta_single, eta_pair = compute_importance(
-                        out_post["states"], out_post["inputs"], out_post["dts"],
-                        Q, R, mode=radapt_importance,
-                    )
-                    sel = select_merge_split(
-                        eta_single, eta_pair, theta.detach().cpu().numpy(),
-                        beta=radapt_beta, rng=rng,
-                    )
-                    if sel is not None:
-                        j, i = sel
-                        theta_new_np = apply_merge_split(
-                            theta.detach().cpu().numpy(), j, i,
-                        )
-                        with torch.no_grad():
-                            theta.copy_(torch.tensor(theta_new_np, dtype=dtype))
-
-                        with torch.no_grad():
-                            out_after = _evaluate(epoch)
-                        loss_after = float(out_after["loss"].item())
-
-                        T_metro = temp_at(epoch)
-                        dL = loss_after - loss_before
-                        if dL <= 0:
-                            accept = True
-                        elif T_metro <= 1e-12:
-                            accept = False
-                        else:
-                            accept = rng.random() < math.exp(-dL / T_metro)
-
-                        if accept:
-                            optim.state.clear()
-                        else:
-                            with torch.no_grad():
-                                theta.copy_(theta_snapshot)
-
-                        radapt_fields = {
-                            "radapt_attempted": True,
-                            "radapt_accepted": bool(accept),
-                            "radapt_j": int(j),
-                            "radapt_i": int(i),
-                            "radapt_dL": float(dL),
-                            "radapt_T": float(T_metro),
-                        }
-
-            entry.update(radapt_fields)
+            entry.update(radapt.maybe_step(epoch, theta, _evaluate, optim))
             history.append(entry)
 
             pbar.set_postfix(
