@@ -2,7 +2,12 @@
 
 ## Project Overview
 
-DIMP (Differentiable Motion Planning) is a research project implementing differentiable trajectory optimization for robotic systems. It uses cvxpylayers to enable backpropagation through convex optimization problems, allowing end-to-end learning with motion planning.
+This repo ships **two sibling Python packages** from one wheel (`src/dimp` and `src/dito`):
+
+- **`dimp`** — Differentiable Motion Planning: cvxpylayer-based MPC for robotic systems (robot models + utilities).
+- **`dito`** — Differentiable Time Optimization: differentiable primitives for learning non-uniform discretization timesteps (LTI ZOH/Euler discretization, regularizer losses, r-adaptive mesh moves, structure-aware cvxpylayer parameter packing).
+
+The two packages are independent (no cross-imports). Examples in `notebooks/time_optimization/` use `dito`; examples in `notebooks/gain_optimization/` use `dimp`.
 
 Key dependencies: `cvxpy`, `cvxpylayers`, `torch`, `matplotlib`, `scipy`.
 
@@ -55,6 +60,19 @@ from dimp.utils import (
     display_animation, save_snapshots, plot_distances, plot_colour_line,
 )
 ```
+
+### DITO library (`src/dito/`)
+
+Generic primitives for differentiable non-uniform discretization, used by the `notebooks/time_optimization/` examples. No dependency on `dimp`.
+
+- `discretization.py` — `zoh_discretize`, `zoh_cost_matrices` (Van Loan), `euler_matrices`, etc.
+- `parametrization.py` — `theta_2_dt` (softmax-simplex)
+- `eval.py` — `task_loss`, `evaluate_continuous_cost`, `uniform_resampling_loss`, `substep_loss`
+- `losses.py` — regularizers (`L_IV`, `L_FI`, `L_PWLH`, `L_SSD`, …) + `LOSS_REGISTRY` + `build_loss_kwargs`
+- `r_adapt.py` — `RAdaptDriver` (Metropolis merge/split moves) and helpers
+- `grad_balance.py` — `AdaptiveGradientBalancer` (EMA-based two-loss weighting)
+- `cvxpy_zoh.py` — `ZOHParamSpec`: structure-aware parameter packing for cvxpylayers (general / fully-diagonal / block-diagonal tiers)
+- `plotting.py` — `plot_timegrid`, `plot_colored`, `add_zoom_inset`
 
 ## Key Patterns
 

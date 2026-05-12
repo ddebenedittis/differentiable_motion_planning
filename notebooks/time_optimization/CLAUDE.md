@@ -48,10 +48,20 @@ System constants are defined once in `*_prob.py` and imported by training/plotti
 - **`stiff_sys/`** — Stiff system LTI (well-separated time constants: 0.1s, 10s, 100s)
 
 ### Shared (top level)
-- **`utils.py`** — Shared utilities (discretization, loss functions, plotting helpers, I/O)
+- **`training.py`** — Shared training loops + `ProblemSpec` dataclass. Each example's `<exp>_train.py` defines a `SPEC` (system constants + thin factory closures around `<exp>_prob.py`) and calls `dispatch_main(SPEC)`. The shared module exposes `train_softmax_method`, `train_aux`, `train_one_loss`, `train_custom_loss`, and `dispatch_main`. Spec flags gate per-example knobs: `pickle_n_default` for the `_nXX` pickle suffix (pann zoh), `use_lr_scheduler` + `grad_clip_norm` for pann's loss training, `loss_disc_choices` (pann adds FOE), `supports_detach` (off for pann), `aux_factory` (pann only), and `use_pann_rep_internal_key` to keep the legacy `"time scaled"` history label.
+- **`utils.py`** — Example glue only: pickle/history-dict conventions, `RunMode`, `MethodConfig`, schema-aware `plot_training_res`/`save_training_res`, summary helpers, and the shared plot driver `run_plot_main`. Generic primitives (discretization, losses, r-adapt, `ZOHParamSpec`, plotting) live in the `dito` package — see root `CLAUDE.md`.
 - **`losses_config.json`** — Shared config controlling which aux losses run and their `lambda0` (see below)
 - **`data/`** — Pickle files with saved results (subdirs per example)
 - **`results/`** — Generated plots and figures (subdirs per example)
+
+### Imports
+
+Scripts split imports between the library and the example glue:
+
+```python
+from dito import LOSS_REGISTRY, theta_2_dt, zoh_cost_matrices, RAdaptDriver, ...
+from utils import RunMode, MethodConfig, plot_training_res, save_pickle, ...
+```
 
 ### Losses Config (`losses_config.json`)
 

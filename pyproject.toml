@@ -36,4 +36,4 @@ test = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/dimp"]
+packages = ["src/dimp", "src/dito"]

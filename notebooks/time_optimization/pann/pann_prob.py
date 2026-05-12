@@ -12,7 +12,7 @@ from cvxpylayers.torch import CvxpyLayer
 import numpy as np
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from utils import ZOHParamSpec  # noqa: E402
+from dito import ZOHParamSpec  # noqa: E402
 
 # ============================================================================ #
 # System Constants (Pannocchia)

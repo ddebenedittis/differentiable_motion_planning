@@ -28,7 +28,7 @@ from tqdm import tqdm
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from stiff_sys_prob import create_stiff_sys_zoh_clqr  # noqa: E402
-from utils import theta_2_dt, zoh_cost_matrices  # noqa: E402
+from dito import theta_2_dt, zoh_cost_matrices  # noqa: E402
 
 from dimp.utils import init_matplotlib, get_colors  # noqa: E402
 

@@ -31,7 +31,7 @@ for _p in (_NOTEBOOK_TIME_OPT, os.path.join(_NOTEBOOK_TIME_OPT, "stiff_sys"),
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from utils import theta_2_dt, zoh_cost_matrices  # noqa: E402
+from dito import theta_2_dt, zoh_cost_matrices  # noqa: E402
 
 RESULTS_DIR = os.path.join(os.path.dirname(__file__), "results")
 
