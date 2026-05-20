@@ -1,14 +1,14 @@
 #!/usr/bin/env python
-"""Visualization for inverted pendulum differentiable time optimization.
+"""Visualization for cart-pole differentiable time optimization.
 
-Loads pickles from data/invpend_dt/ and produces plots in results/invpend_dt/.
+Loads pickles from data/cartpole_dt/ and produces plots in results/cartpole/.
 
 Usage:
-    python invpend_plot.py
-    python invpend_plot.py --method rep zoh
-    python invpend_plot.py --analysis-only
-    python invpend_plot.py --show
-    python invpend_plot.py --baseline
+    python cartpole_plot.py
+    python cartpole_plot.py --method rep zoh
+    python cartpole_plot.py --analysis-only
+    python cartpole_plot.py --show
+    python cartpole_plot.py --baseline
 """
 
 import os
@@ -20,11 +20,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import matplotlib.pyplot as plt
 import numpy as np
 
-from invpend_prob import (
-    create_invpend_baseline_clqr,
+from cartpole_prob import (
+    create_cartpole_baseline_clqr,
     A, B, s0, s_goal, T, Q, R, u_max, v_max, theta_max, x_max, n_s, n_u, e0,
 )
-from invpend_train import SPEC
+from cartpole_train import SPEC
 from utils import MethodConfig, run_plot_main
 
 
@@ -38,13 +38,13 @@ METHOD_CONFIGS = [
 
 
 # ============================================================================ #
-# Inverted Pendulum Trajectory Plot
+# Cart-Pole Trajectory Plot
 # ============================================================================ #
 
-def plot_invpend_trajectory(dts, n, *, sol=None, s_arr=None, u_arr=None,
-                            title=None, results_dir=None, filename=None,
-                            show=False):
-    """Inverted-pendulum trajectory plot with state-constraint overlays."""
+def plot_cartpole_trajectory(dts, n, *, sol=None, s_arr=None, u_arr=None,
+                             title=None, results_dir=None, filename=None,
+                             show=False):
+    """Cart-pole trajectory plot with state-constraint overlays."""
     if sol is not None:
         e_arr = np.array([sol[i].detach().numpy() for i in range(n)])
         u_arr = np.array([sol[n + i].detach().numpy() for i in range(n)])
@@ -126,7 +126,7 @@ def plot_baseline_sweep(results_dir, show=False, n_tests=None):
     for i, n_test in enumerate(n_tests):
         dt_test = T / n_test
         try:
-            prob, s_test, u_test = create_invpend_baseline_clqr(
+            prob, s_test, u_test = create_cartpole_baseline_clqr(
                 n_test, s0, A, B, Q, R, dt_test, u_max, x_max, s_goal,
             )
             t0 = time.time()
@@ -163,12 +163,12 @@ def plot_baseline_sweep(results_dir, show=False, n_tests=None):
         plt.close(fig)
 
 
-class _InvpendBaselineProb:
-    """Wraps invpend baseline so the runner sees actual states (not error)."""
+class _CartpoleBaselineProb:
+    """Wraps cart-pole baseline so the runner sees actual states (not error)."""
     __slots__ = ("inner", "_s_actual", "_u")
 
     def __init__(self, n):
-        prob, s_test, u_test = create_invpend_baseline_clqr(
+        prob, s_test, u_test = create_cartpole_baseline_clqr(
             n, s0, A, B, Q, R, T / n, u_max, x_max, s_goal,
         )
         self.inner = prob
@@ -203,7 +203,7 @@ class _StateActualProxy:
 
 
 def _baseline_factory(n):
-    wrapper = _InvpendBaselineProb(n)
+    wrapper = _CartpoleBaselineProb(n)
     return wrapper, wrapper._s_actual, wrapper._u
 
 
@@ -216,7 +216,7 @@ def _baseline_sweep_step(args, results_dir, method_results, loss_results):
 if __name__ == "__main__":
     run_plot_main(
         SPEC, METHOD_CONFIGS,
-        trajectory_plot_fn=plot_invpend_trajectory,
+        trajectory_plot_fn=plot_cartpole_trajectory,
         baseline_factory=_baseline_factory,
         baseline_n_fallback=80,
         extra_steps=[_baseline_sweep_step],

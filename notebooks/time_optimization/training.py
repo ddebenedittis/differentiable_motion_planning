@@ -1,6 +1,6 @@
 """Shared training infrastructure for differentiable time optimization examples.
 
-Each example (`invpend`, `pann`, `stiff_sys`) defines a `ProblemSpec` and the
+Each example (`cartpole`, `pann`, `stiff_sys`) defines a `ProblemSpec` and the
 heavy lifting (training loops, argparse, pickle naming) is performed here.
 
 Public entry points:

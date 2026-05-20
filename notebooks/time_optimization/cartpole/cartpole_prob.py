@@ -1,4 +1,4 @@
-"""Inverted-pendulum QP builders for differentiable time optimization.
+"""Cart-pole QP builders for differentiable time optimization.
 
 All QP builders work in error coordinates: e = s - s_goal, where s_goal is the
 terminal goal state. This is exact because A @ s_goal = 0 for the linearized
@@ -25,8 +25,9 @@ from dito import ZOHParamSpec  # noqa: E402
 # ============================================================================ #
 # System Constants (Linearized Cart-Pole)
 # ============================================================================ #
+# Parameters matched to ocslc/examples/cartpole.py.
 
-m_p, M_c, l_p, g_val = 0.2, 1.0, 0.5, 9.81
+m_p, M_c, l_p, g_val = 0.1, 1.0, 0.5, 9.81
 
 A = np.array([
     [0, 1, 0, 0],
@@ -36,16 +37,17 @@ A = np.array([
 ])
 B = np.array([[0], [1 / M_c], [0], [-1 / (M_c * l_p)]])
 
-s0 = np.array([0.0, 0.0, 0.1, 0.0])
+s0 = np.array([0.0, 0.0, 0.0, 0.0])
 s_goal = np.array([5.0, 0.0, 0.0, 0.0])
 T = 5.0
 n_default = 40
-Q = np.diag([1.0, 0.1, 10.0, 0.1])
+Q = np.diag([1.0, 0.1, 100.0, 0.1])
 R = 0.01 * np.eye(1)
 u_max = 10.0
 v_max = 2.0
-theta_max = 0.15
-x_max = {1: v_max, 2: theta_max}
+theta_max = 0.3
+theta_dot_max = 2.0
+x_max = {1: v_max, 2: theta_max, 3: theta_dot_max}
 n_s = 4
 n_u = 1
 e0 = s0 - s_goal
@@ -61,7 +63,7 @@ def _validate_error_coords(s_goal, x_max):
             )
 
 
-def create_invpend_baseline_clqr(n, s0, A, B, Q, R, dt, u_max, x_max, s_goal):
+def create_cartpole_baseline_clqr(n, s0, A, B, Q, R, dt, u_max, x_max, s_goal):
     """Baseline uniform-timestep constrained LQR with state + terminal constraints.
 
     Args:
@@ -115,7 +117,7 @@ def create_invpend_baseline_clqr(n, s0, A, B, Q, R, dt, u_max, x_max, s_goal):
     return problem, s_vars, u_vars
 
 
-def create_invpend_rep_clqr(n, s0, A, B, Q, R, u_max, x_max, s_goal):
+def create_cartpole_rep_clqr(n, s0, A, B, Q, R, u_max, x_max, s_goal):
     """Rep method: dt as direct CVXPY parameters (Euler dynamics).
 
     Same structure as create_pann_param_clqr_2, with added state + terminal
@@ -179,7 +181,7 @@ def create_invpend_rep_clqr(n, s0, A, B, Q, R, u_max, x_max, s_goal):
     return problem, layer, s_vars, u_vars, dts_param
 
 
-def create_invpend_zoh_clqr(n, s0, n_s, n_u, u_max, x_max, s_goal):
+def create_cartpole_zoh_clqr(n, s0, n_s, n_u, u_max, x_max, s_goal):
     """ZOH3 method: exact ZOH dynamics + exact integrated quadratic cost.
 
     Uses ZOHParamSpec to declare structure-aware parameter shapes (general or
@@ -210,25 +212,23 @@ def create_invpend_zoh_clqr(n, s0, n_s, n_u, u_max, x_max, s_goal):
     u_vars = [cp.Variable(n_u, name=f"u_{i}") for i in range(n)]
     step_params = [spec.make_step_params(k) for k in range(n)]
 
-    objective = cp.sum([
-        spec.cost_expr(s_vars[k], u_vars[k], step_params[k])
+    # Single SOC cone for the whole-horizon cost (Fix B).
+    objective = spec.total_cost_expr(s_vars[:n], u_vars, step_params)
+
+    # Vectorized constraints (Fix C): one Zero cone for stacked dynamics,
+    # one NonNeg cone for stacked |u|<=u_max, one pair per constrained
+    # state index. Was 3n+ separate cones in the per-step formulation.
+    S_next = cp.vstack(s_vars[1:])  # (n, n_s)
+    U_mat = cp.vstack(u_vars)       # (n, n_u)
+    DYN = cp.vstack([
+        spec.dynamics_expr(s_vars[k], u_vars[k], step_params[k])
         for k in range(n)
     ])
-
-    constraints = [
-        s_vars[k + 1] == spec.dynamics_expr(s_vars[k], u_vars[k], step_params[k])
-        for k in range(n)
-    ] + [
-        cp.abs(u_vars[k]) <= u_max for k in range(n)
-    ]
+    constraints = [S_next == DYN, cp.abs(U_mat) <= u_max]
 
     if x_max is not None:
         for idx, bound in x_max.items():
-            constraints += [
-                s_vars[k + 1][idx] <= bound for k in range(n)
-            ] + [
-                s_vars[k + 1][idx] >= -bound for k in range(n)
-            ]
+            constraints += [S_next[:, idx] <= bound, S_next[:, idx] >= -bound]
 
     constraints += [s_vars[n] == np.zeros(n_s)]
 

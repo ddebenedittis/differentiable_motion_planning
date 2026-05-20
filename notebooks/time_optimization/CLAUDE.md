@@ -44,7 +44,7 @@ System constants are defined once in `*_prob.py` and imported by training/plotti
 ### Examples
 
 - **`pann/`** — Pannocchia CLQR (3 states, 1 input)
-- **`invpend/`** — Inverted pendulum (linearized cart-pole, error coordinates)
+- **`cartpole/`** — Linearized cart-pole (error coordinates)
 - **`stiff_sys/`** — Stiff system LTI (well-separated time constants: 0.1s, 10s, 100s)
 
 ### Shared (top level)
@@ -85,7 +85,7 @@ Edit this one file to add/remove losses globally.
 
 ### Script Usage
 ```bash
-# Generic pattern (replace <dir>/<exp> with e.g. pann/pann, invpend/invpend, stiff_sys/stiff_sys):
+# Generic pattern (replace <dir>/<exp> with e.g. pann/pann, cartpole/cartpole, stiff_sys/stiff_sys):
 python <dir>/<exp>_train.py --mode test --experiment all
 python <dir>/<exp>_train.py --mode full --experiment methods --method rep
 python <dir>/<exp>_train.py --mode full --experiment losses --loss L_IV L_FI
