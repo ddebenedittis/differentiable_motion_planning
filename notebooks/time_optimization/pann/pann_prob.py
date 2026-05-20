@@ -301,19 +301,20 @@ def create_exact_zoh_cost_clqr(n, s0, n_s, n_u, u_max=1.0):
 
     s_vars = [s0] + [cp.Variable(n_s, name=f"s_{i}") for i in range(n)]
     u_vars = [cp.Variable(n_u, name=f"u_{i}") for i in range(n)]
-    step_params = [spec.make_step_params(k) for k in range(n)]
+    step_params = spec.make_step_params(n)
 
-    objective = cp.sum([
-        spec.cost_expr(s_vars[k], u_vars[k], step_params[k])
+    # Single SOC cone for the whole-horizon cost (Fix B).
+    objective = spec.total_cost_expr(s_vars[:n], u_vars, step_params)
+
+    # Vectorized constraints (Fix C): one Zero cone for stacked dynamics,
+    # one NonNeg cone for stacked |u|<=u_max. Was 2n separate cones.
+    S_next = cp.vstack(s_vars[1:])  # (n, n_s)
+    U_mat = cp.vstack(u_vars)       # (n, n_u)
+    DYN = cp.vstack([
+        spec.dynamics_expr(s_vars[k], u_vars[k], step_params[k])
         for k in range(n)
     ])
-
-    constraints = [
-        s_vars[k + 1] == spec.dynamics_expr(s_vars[k], u_vars[k], step_params[k])
-        for k in range(n)
-    ] + [
-        cp.abs(u_vars[k]) <= u_max for k in range(n)
-    ]
+    constraints = [S_next == DYN, cp.abs(U_mat) <= u_max]
 
     problem = cp.Problem(cp.Minimize(objective), constraints)
 
@@ -321,6 +322,7 @@ def create_exact_zoh_cost_clqr(n, s0, n_s, n_u, u_max=1.0):
         problem,
         parameters=spec.layer_parameters(step_params),
         variables=s_vars[1:] + u_vars,
+        canon_backend=cp.COO_CANON_BACKEND,
     )
 
     return problem, layer, s_vars, u_vars, spec

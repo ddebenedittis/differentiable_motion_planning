@@ -12,5 +12,6 @@ results
 *.pdf
 *.pkl
 *.png
+*.prof
 acados_ocp.json
 .worktrees/

@@ -100,42 +100,97 @@ class ZOHParamSpec:
 
     # ---------------------------------------------------------------- cvxpy side
 
-    def make_step_params(self, k):
-        """Build the dict of cp.Parameter objects for a single step k."""
+    def make_step_params(self, n):
+        """Build per-step view-dicts that slice into shared N-dim parameter stacks.
+
+        Instead of declaring 5n separate `cp.Parameter` objects (one per
+        timestep), this allocates a handful of stacked parameters of shape
+        `(n, ...)` and exposes per-step `cp.Parameter[k]` views with the same
+        legacy dict structure. Downstream expressions (`dynamics_expr`,
+        `_cost_vector_expr`, `total_cost_expr`) work unchanged on the views.
+
+        The stacks are stored on `self` so `layer_parameters` and
+        `flatten_for_layer` can return / stack into them without re-deriving
+        from the view-dicts.
+
+        Args:
+            n: horizon length (number of timesteps).
+
+        Returns:
+            list of length `n`; each entry is a dict with the same keys as
+            the legacy per-step factory.
+        """
         n_s, n_u, m = self.n_s, self.n_u, self.m
+        self._n = n
+
         if self.tier == "general":
-            return {
-                "Ad": cp.Parameter((n_s, n_s), name=f"Ad_{k}"),
-                "Bd": cp.Parameter((n_s, n_u), name=f"Bd_{k}"),
-                "Lx": cp.Parameter((m, n_s), name=f"Lx_{k}"),
-                "Lu": cp.Parameter((m, n_u), name=f"Lu_{k}"),
-            }
+            self._Ad_all = cp.Parameter((n, n_s, n_s), name="Ad_all")
+            self._Bd_all = cp.Parameter((n, n_s, n_u), name="Bd_all")
+            self._Lx_all = cp.Parameter((n, m, n_s), name="Lx_all")
+            self._Lu_all = cp.Parameter((n, m, n_u), name="Lu_all")
+            return [
+                {
+                    "Ad": self._Ad_all[k],
+                    "Bd": self._Bd_all[k],
+                    "Lx": self._Lx_all[k],
+                    "Lu": self._Lu_all[k],
+                }
+                for k in range(n)
+            ]
+
         if self.tier == "fully_diagonal":
-            return {
-                "Ad_diag": cp.Parameter(n_s, name=f"Adiag_{k}"),
-                "Bd": cp.Parameter((n_s, n_u), name=f"Bd_{k}"),
-                "L_diag": cp.Parameter(n_s, name=f"Ldiag_{k}"),
-                "L_xu": cp.Parameter((n_s, n_u), name=f"Lxu_{k}"),
-                "L_uu": cp.Parameter((n_u, n_u), name=f"Luu_{k}"),
-            }
+            self._Ad_diag_all = cp.Parameter((n, n_s), name="Ad_diag_all")
+            self._Bd_all = cp.Parameter((n, n_s, n_u), name="Bd_all")
+            self._L_diag_all = cp.Parameter((n, n_s), name="L_diag_all")
+            self._L_xu_all = cp.Parameter((n, n_s, n_u), name="L_xu_all")
+            self._L_uu_all = cp.Parameter((n, n_u, n_u), name="L_uu_all")
+            return [
+                {
+                    "Ad_diag": self._Ad_diag_all[k],
+                    "Bd": self._Bd_all[k],
+                    "L_diag": self._L_diag_all[k],
+                    "L_xu": self._L_xu_all[k],
+                    "L_uu": self._L_uu_all[k],
+                }
+                for k in range(n)
+            ]
+
         # block_diagonal: at least one block has size > 1.
-        Ad_blocks = []
-        L11_blocks = []
+        self._Ad_b_all = []
+        self._L11_b_all = []
         for bi, block in enumerate(self.blocks):
             b = len(block)
             if b == 1:
-                Ad_blocks.append(cp.Parameter(1, name=f"Ad_{k}_b{bi}"))
-                L11_blocks.append(cp.Parameter(1, name=f"L11_{k}_b{bi}"))
+                self._Ad_b_all.append(
+                    cp.Parameter((n, 1), name=f"Ad_b{bi}_all")
+                )
+                self._L11_b_all.append(
+                    cp.Parameter((n, 1), name=f"L11_b{bi}_all")
+                )
             else:
-                Ad_blocks.append(cp.Parameter((b, b), name=f"Ad_{k}_b{bi}"))
-                L11_blocks.append(cp.Parameter((b, b), name=f"L11_{k}_b{bi}"))
-        return {
-            "Ad_blocks": Ad_blocks,
-            "L11_blocks": L11_blocks,
-            "Bd": cp.Parameter((n_s, n_u), name=f"Bd_{k}"),
-            "L_xu": cp.Parameter((n_s, n_u), name=f"Lxu_{k}"),
-            "L_uu": cp.Parameter((n_u, n_u), name=f"Luu_{k}"),
-        }
+                self._Ad_b_all.append(
+                    cp.Parameter((n, b, b), name=f"Ad_b{bi}_all")
+                )
+                self._L11_b_all.append(
+                    cp.Parameter((n, b, b), name=f"L11_b{bi}_all")
+                )
+        self._Bd_all = cp.Parameter((n, n_s, n_u), name="Bd_all")
+        self._L_xu_all = cp.Parameter((n, n_s, n_u), name="L_xu_all")
+        self._L_uu_all = cp.Parameter((n, n_u, n_u), name="L_uu_all")
+        return [
+            {
+                "Ad_blocks": [
+                    self._Ad_b_all[bi][k] for bi in range(len(self.blocks))
+                ],
+                "L11_blocks": [
+                    self._L11_b_all[bi][k] for bi in range(len(self.blocks))
+                ],
+                "Bd": self._Bd_all[k],
+                "L_xu": self._L_xu_all[k],
+                "L_uu": self._L_uu_all[k],
+            }
+            for k in range(n)
+        ]
 
     def dynamics_expr(self, s_var, u_var, params):
         """cvxpy expression for `Ad @ s + Bd @ u`."""
@@ -173,26 +228,24 @@ class ZOHParamSpec:
                     scalars[gi] = seg[li:li + 1]
         return cp.hstack(scalars) + Bd_term
 
-    def cost_expr(self, s_var, u_var, params):
-        """cvxpy expression for `||L^T z||^2` for one step (z = [s; u]).
+    def _cost_vector_expr(self, s_var, u_var, params):
+        """Per-step cost vector y_k of length m such that step cost = ||y_k||^2.
 
-        Always emits exactly one `cp.sum_squares` atom per step, matching the
-        legacy formulation's per-step cone count. Splitting into multiple
-        `sum_squares` would double the SOC cone count in the diffcp affine
-        map and slow the LSQR backward pass.
+        Returned separately from the sum_squares atom so that `total_cost_expr`
+        can stack all steps and wrap them in a single sum_squares (one SOC
+        cone for the whole horizon instead of n).
         """
         if self.tier == "general":
-            return cp.sum_squares(params["Lx"] @ s_var + params["Lu"] @ u_var)
+            return params["Lx"] @ s_var + params["Lu"] @ u_var
 
         if self.tier == "fully_diagonal":
             state_part = (
                 cp.multiply(params["L_diag"], s_var) + params["L_xu"] @ u_var
             )
             input_part = params["L_uu"] @ u_var
-            return cp.sum_squares(cp.hstack([state_part, input_part]))
+            return cp.hstack([state_part, input_part])
 
-        # block_diagonal: assemble the full length-m vector y = L^T @ z and
-        # emit one sum_squares so the cone structure matches legacy exactly.
+        # block_diagonal: assemble the full length-m vector y = L^T @ z.
         L_xu = params["L_xu"]
         n_s = self.n_s
 
@@ -229,37 +282,56 @@ class ZOHParamSpec:
             state_part = cp.hstack(scalars)
 
         input_part = params["L_uu"] @ u_var
-        return cp.sum_squares(cp.hstack([state_part, input_part]))
+        return cp.hstack([state_part, input_part])
 
-    def layer_parameters(self, step_params_list):
-        """Flat list of cp.Parameters for `CvxpyLayer(parameters=...)`.
+    def cost_expr(self, s_var, u_var, params):
+        """Per-step ``||L^T z||^2`` (z = [s; u]). One sum_squares per step.
+
+        Kept for backward compatibility. New code should prefer
+        :meth:`total_cost_expr`, which produces a single SOC cone across all
+        timesteps instead of n separate ones.
+        """
+        return cp.sum_squares(self._cost_vector_expr(s_var, u_var, params))
+
+    def total_cost_expr(self, s_vars, u_vars, step_params_list):
+        """Single-SOC-cone cost over all timesteps.
+
+        Math is identical to ``sum_k cost_expr(s_vars[k], u_vars[k],
+        step_params_list[k])``: ``||hstack([L_k^T z_k for k])||^2`` equals
+        ``sum_k ||L_k^T z_k||^2``. The difference is canonical form — this
+        produces a single SOC cone (one ``format_constraints`` call) instead
+        of n, which is the dominant ``CvxpyLayer.__init__`` cost.
+        """
+        pieces = [
+            self._cost_vector_expr(s_var, u_var, params)
+            for s_var, u_var, params in zip(
+                s_vars, u_vars, step_params_list, strict=True
+            )
+        ]
+        return cp.sum_squares(cp.hstack(pieces))
+
+    def layer_parameters(self, step_params_list=None):
+        """Flat list of stacked cp.Parameters for `CvxpyLayer(parameters=...)`.
+
+        The stacks were allocated by `make_step_params(n)` and stored on
+        `self`. The `step_params_list` argument is unused — kept only so
+        existing callers (`spec.layer_parameters(step_params)`) continue to
+        work without modification.
 
         Order must match `flatten_for_layer`.
         """
         if self.tier == "general":
-            Ads = [p["Ad"] for p in step_params_list]
-            Bds = [p["Bd"] for p in step_params_list]
-            Lxs = [p["Lx"] for p in step_params_list]
-            Lus = [p["Lu"] for p in step_params_list]
-            return Ads + Bds + Lxs + Lus
+            return [self._Ad_all, self._Bd_all, self._Lx_all, self._Lu_all]
         if self.tier == "fully_diagonal":
-            Ads = [p["Ad_diag"] for p in step_params_list]
-            Bds = [p["Bd"] for p in step_params_list]
-            Lds = [p["L_diag"] for p in step_params_list]
-            Lxus = [p["L_xu"] for p in step_params_list]
-            Luus = [p["L_uu"] for p in step_params_list]
-            return Ads + Bds + Lds + Lxus + Luus
+            return [
+                self._Ad_diag_all, self._Bd_all,
+                self._L_diag_all, self._L_xu_all, self._L_uu_all,
+            ]
         # block_diagonal
-        n_blocks = len(self.blocks)
-        out = []
-        for bi in range(n_blocks):
-            out.extend(p["Ad_blocks"][bi] for p in step_params_list)
-        for bi in range(n_blocks):
-            out.extend(p["L11_blocks"][bi] for p in step_params_list)
-        out.extend(p["Bd"] for p in step_params_list)
-        out.extend(p["L_xu"] for p in step_params_list)
-        out.extend(p["L_uu"] for p in step_params_list)
-        return out
+        return (
+            list(self._Ad_b_all) + list(self._L11_b_all)
+            + [self._Bd_all, self._L_xu_all, self._L_uu_all]
+        )
 
     # ---------------------------------------------------------------- torch side
 
@@ -314,31 +386,38 @@ class ZOHParamSpec:
         }
 
     def flatten_for_layer(self, packed_step_list):
-        """Flat tuple of torch tensors for `layer(*tensors)`.
+        """Flat tuple of N-dim torch tensors for `layer(*tensors)`.
 
-        Order matches `layer_parameters`.
+        Each parameter type is stacked once along dim 0 across the n
+        timesteps. Order matches `layer_parameters`.
         """
         if self.tier == "general":
-            Ads = [p["Ad"] for p in packed_step_list]
-            Bds = [p["Bd"] for p in packed_step_list]
-            Lxs = [p["Lx"] for p in packed_step_list]
-            Lus = [p["Lu"] for p in packed_step_list]
-            return Ads + Bds + Lxs + Lus
+            return [
+                torch.stack([p["Ad"] for p in packed_step_list], dim=0),
+                torch.stack([p["Bd"] for p in packed_step_list], dim=0),
+                torch.stack([p["Lx"] for p in packed_step_list], dim=0),
+                torch.stack([p["Lu"] for p in packed_step_list], dim=0),
+            ]
         if self.tier == "fully_diagonal":
-            Ads = [p["Ad_diag"] for p in packed_step_list]
-            Bds = [p["Bd"] for p in packed_step_list]
-            Lds = [p["L_diag"] for p in packed_step_list]
-            Lxus = [p["L_xu"] for p in packed_step_list]
-            Luus = [p["L_uu"] for p in packed_step_list]
-            return Ads + Bds + Lds + Lxus + Luus
+            return [
+                torch.stack([p["Ad_diag"] for p in packed_step_list], dim=0),
+                torch.stack([p["Bd"] for p in packed_step_list], dim=0),
+                torch.stack([p["L_diag"] for p in packed_step_list], dim=0),
+                torch.stack([p["L_xu"] for p in packed_step_list], dim=0),
+                torch.stack([p["L_uu"] for p in packed_step_list], dim=0),
+            ]
         # block_diagonal
         n_blocks = len(self.blocks)
         out = []
         for bi in range(n_blocks):
-            out.extend(p["Ad_blocks"][bi] for p in packed_step_list)
+            out.append(torch.stack(
+                [p["Ad_blocks"][bi] for p in packed_step_list], dim=0,
+            ))
         for bi in range(n_blocks):
-            out.extend(p["L11_blocks"][bi] for p in packed_step_list)
-        out.extend(p["Bd"] for p in packed_step_list)
-        out.extend(p["L_xu"] for p in packed_step_list)
-        out.extend(p["L_uu"] for p in packed_step_list)
+            out.append(torch.stack(
+                [p["L11_blocks"][bi] for p in packed_step_list], dim=0,
+            ))
+        out.append(torch.stack([p["Bd"] for p in packed_step_list], dim=0))
+        out.append(torch.stack([p["L_xu"] for p in packed_step_list], dim=0))
+        out.append(torch.stack([p["L_uu"] for p in packed_step_list], dim=0))
         return out

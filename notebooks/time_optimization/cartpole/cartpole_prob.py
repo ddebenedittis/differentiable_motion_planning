@@ -210,7 +210,7 @@ def create_cartpole_zoh_clqr(n, s0, n_s, n_u, u_max, x_max, s_goal):
 
     s_vars = [e0] + [cp.Variable(n_s, name=f"s_{i}") for i in range(n)]
     u_vars = [cp.Variable(n_u, name=f"u_{i}") for i in range(n)]
-    step_params = [spec.make_step_params(k) for k in range(n)]
+    step_params = spec.make_step_params(n)
 
     # Single SOC cone for the whole-horizon cost (Fix B).
     objective = spec.total_cost_expr(s_vars[:n], u_vars, step_params)
@@ -238,6 +238,7 @@ def create_cartpole_zoh_clqr(n, s0, n_s, n_u, u_max, x_max, s_goal):
         problem,
         parameters=spec.layer_parameters(step_params),
         variables=s_vars[1:] + u_vars,
+        canon_backend=cp.COO_CANON_BACKEND,
     )
 
     return problem, layer, s_vars, u_vars, spec
