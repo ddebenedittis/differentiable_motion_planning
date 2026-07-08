@@ -25,8 +25,8 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from _common import make_run_dir, write_metadata
-import bench_pann
-import bench_stiff_sys
+import bench_stiff_sys  # noqa: E402
+# import bench_pann  # noqa: E402
 
 
 def main():
@@ -50,11 +50,11 @@ def main():
     df_stiff = bench_stiff_sys.run(
         out_dir, n_epochs=args.epochs, backward_mode=args.backward_mode,
     )
-    df_pann = bench_pann.run(
-        out_dir, n_epochs=args.epochs, backward_mode=args.backward_mode,
-    )
+    # df_pann = bench_pann.run(
+    #     out_dir, n_epochs=args.epochs, backward_mode=args.backward_mode,
+    # )
 
-    df_all = pd.concat([df_stiff, df_pann], ignore_index=True)
+    df_all = pd.concat([df_stiff], ignore_index=True)
     df_all.to_csv(os.path.join(out_dir, "all.csv"), index=False)
 
     print("\n" + "=" * 80)

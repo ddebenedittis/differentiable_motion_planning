@@ -6,8 +6,15 @@ from matplotlib.colors import LogNorm, Normalize
 from matplotlib.patches import ConnectionPatch, Rectangle
 
 
-def plot_timegrid(deltas, x=None, ax=None, ylabel=None, title=None):
-    """Plot time grid lines and optionally overlay a trajectory."""
+def plot_timegrid(deltas, x=None, ax=None, ylabel=None, title=None,
+                  labels=None):
+    """Plot time grid lines and optionally overlay a trajectory.
+
+    Args:
+        labels: optional sequence of per-component labels for the overlaid
+            trajectory. When given, each state line is labelled and a small
+            legend is drawn.
+    """
     times = np.cumsum(deltas.tolist())
 
     if ax is None:
@@ -16,7 +23,11 @@ def plot_timegrid(deltas, x=None, ax=None, ylabel=None, title=None):
         ax.axvline(t, color='gray', linestyle='--', alpha=0.25)
 
     if x is not None:
-        ax.plot(times, x)
+        lines = ax.plot(times, x)
+        if labels is not None:
+            for line, lab in zip(lines, labels):
+                line.set_label(lab)
+            ax.legend(fontsize=7, loc='best')
 
     ax.set_xlabel("Time")
     if ylabel is not None:

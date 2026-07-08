@@ -534,6 +534,9 @@ def train_one_loss(spec: ProblemSpec, loss_name, n, n_epochs, lr, lambda0,
 def train_custom_loss(spec: ProblemSpec, loss_weights, n=None, n_epochs=200,
                       lr=3e-2, *, detach="none", discretization="zoh",
                       ocp_weight=1.0, tau_schedule=None,
+                      adam_betas=(0.9, 0.999),
+                      refine_lbfgs=True,
+                      lbfgs_max_iter=100,
                       radapt_enable=False,
                       radapt_every=10,
                       radapt_freq_schedule=None,
@@ -547,6 +550,12 @@ def train_custom_loss(spec: ProblemSpec, loss_weights, n=None, n_epochs=200,
     """Training loop with a fixed-weight composite loss.
 
     Total loss is  ocp_weight * L_ocp + sum_i (w_i * L_i).
+
+    The composite loss is piecewise-smooth in theta (kinks at QP active-set
+    transitions). To avoid Adam drifting away from a kink minimum, the final
+    theta is the best-loss iterate seen during training (not the last). When
+    `refine_lbfgs=True`, a final LBFGS-Wolfe pass from that iterate guarantees
+    no smooth descent direction remains within the active-set piece.
     """
     if discretization not in ("zoh", "euler"):
         raise ValueError(
@@ -564,7 +573,7 @@ def train_custom_loss(spec: ProblemSpec, loss_weights, n=None, n_epochs=200,
                 f"Unknown loss: {name}. Available: {list(LOSS_REGISTRY.keys())}")
 
     theta = torch.nn.Parameter(torch.ones(n, 1, dtype=dtype))
-    optim = torch.optim.Adam([theta], lr=lr)
+    optim = torch.optim.Adam([theta], lr=lr, betas=adam_betas)
 
     if discretization == "zoh":
         layer, zoh_spec = spec.zoh_factory(n)
@@ -642,8 +651,25 @@ def train_custom_loss(spec: ProblemSpec, loss_weights, n=None, n_epochs=200,
             "states": states_l, "inputs": inputs_l, "dts": dts_l, "tau": tau_l,
         }
 
+    def _history_entry_from_out(epoch_, out_):
+        entry_ = {
+            "epoch": epoch_,
+            "loss": float(out_["loss"].item()),
+            "loss_ocp": float(out_["loss_ocp"].item()),
+            "loss_reg_total": float(out_["loss_reg_total"].item()),
+            "dts": out_["dts"].detach().cpu().numpy(),
+            "tau": out_["tau"],
+            "detach": detach,
+        }
+        entry_.update({f"loss_{name}": float(v.item())
+                       for name, v in out_["reg_losses"].items()})
+        entry_.update(dict(RAdaptDriver.NULL_FIELDS))
+        return entry_
+
     history = []
     sol = None
+    best_loss = float("inf")
+    best_theta_state = theta.detach().clone()
 
     label = " + ".join(f"{w}*{name}" for name, w in loss_weights.items())
     disc_tag = discretization.upper()
@@ -658,9 +684,14 @@ def train_custom_loss(spec: ProblemSpec, loss_weights, n=None, n_epochs=200,
             optim.step()
             sol = out["sol"]
 
+            loss_val = float(loss.item())
+            if loss_val < best_loss:
+                best_loss = loss_val
+                best_theta_state = theta.detach().clone()
+
             entry = {
                 "epoch": epoch,
-                "loss": float(loss.item()),
+                "loss": loss_val,
                 "loss_ocp": float(out["loss_ocp"].item()),
                 "loss_reg_total": float(out["loss_reg_total"].item()),
                 "dts": out["dts"].detach().cpu().numpy(),
@@ -680,7 +711,51 @@ def train_custom_loss(spec: ProblemSpec, loss_weights, n=None, n_epochs=200,
                 tau=f"{out['tau']:.3f}",
             )
 
-    print(f"  Final loss: {history[-1]['loss']:.6f}")
+    adam_best_loss = best_loss
+    adam_final_loss = history[-1]["loss"]
+
+    # Restore best-iterate theta (best-iterate selection — standard in non-
+    # smooth optimization since the loss is piecewise-quadratic in theta and
+    # Adam can step out of the basin it just found).
+    with torch.no_grad():
+        theta.copy_(best_theta_state)
+    with torch.no_grad():
+        out_best = _evaluate(n_epochs - 1)
+    sol = out_best["sol"]
+    history.append({
+        **_history_entry_from_out(n_epochs, out_best),
+        "phase": "adam_best",
+    })
+
+    if refine_lbfgs:
+        # LBFGS with strong-Wolfe line search: monotone descent, guaranteed
+        # to not undo Adam's best iterate.
+        lbfgs = torch.optim.LBFGS(
+            [theta], lr=1.0, max_iter=lbfgs_max_iter,
+            tolerance_grad=1e-9, tolerance_change=1e-12,
+            line_search_fn="strong_wolfe",
+        )
+
+        def _closure():
+            lbfgs.zero_grad(set_to_none=True)
+            out_ = _evaluate(n_epochs - 1)
+            out_["loss"].backward()
+            return out_["loss"]
+
+        lbfgs.step(_closure)
+
+        with torch.no_grad():
+            out_refined = _evaluate(n_epochs - 1)
+        sol = out_refined["sol"]
+        history.append({
+            **_history_entry_from_out(n_epochs + 1, out_refined),
+            "phase": "lbfgs_refined",
+        })
+
+    print(f"  Adam final loss:   {adam_final_loss:.6f}")
+    print(f"  Adam best loss:    {adam_best_loss:.6f}")
+    print(f"  Returned loss:     {history[-1]['loss']:.6f}"
+          f"{'  (LBFGS-refined)' if refine_lbfgs else ''}")
     return sol, history, n
 
 

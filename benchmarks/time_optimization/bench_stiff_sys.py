@@ -1,4 +1,4 @@
-"""Stiff-system speed benchmark: n_states in {5, 10, 20} x n_control in {50, 100}.
+"""Stiff-system speed benchmark: n_states in {5, 10, 15, 20, 25, 30} x n_control in {20, 40, 60, 80, 100}.
 
 Uses the exact-ZOH parametrization (the same path the training scripts in
 ``notebooks/time_optimization/stiff_sys`` use). System matrices are built with
@@ -21,8 +21,8 @@ T_HORIZON = 10.0
 U_MAX = 10.0
 X_MAX = None
 
-N_STATES_LIST = [5, 10, 20]
-N_CONTROL_LIST = [50, 100]
+N_STATES_LIST = [5, 10, 15, 20, 25, 30]
+N_CONTROL_LIST = [20, 40, 60, 80, 100]
 DEFAULT_N_EPOCHS = 20
 
 

@@ -51,7 +51,8 @@ def gen_arrow_head_marker(rot):
 def init_matplotlib(palette: str = 'matlab'):
     colors = get_colors(palette)
 
-    lines = ['-', '--', '-', '--', '-', '--', '-', '--', '-', '--']
+    # lines = ['-', '--', '-', '--', '-', '--', '-', '--', '-', '--']
+    lines = ['-', '-', '-', '-', '-', '-', '-', '-', '-', '-']
     lines = lines[:len(colors)]
     
     default_cycler = (

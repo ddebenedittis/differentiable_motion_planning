@@ -15,6 +15,8 @@ from enum import Enum
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.collections import LineCollection
+from matplotlib.legend_handler import HandlerLineCollection
 from matplotlib.lines import Line2D
 
 from dito import (
@@ -98,9 +100,82 @@ def _extract_dts(sol, history, n, sol_method):
         raise ValueError(f"Unknown sol_method {sol_method}")
 
 
+class _HandlerColorLine(HandlerLineCollection):
+    """Legend handler that renders a LineCollection as a gradient line.
+
+    Used so the non-uniform entry in the input legend shows the same
+    color-changing (colormap) line as the plotted colored input, instead of a
+    single flat swatch.
+    """
+
+    def create_artists(self, legend, artist, xdescent, ydescent,
+                        width, height, fontsize, trans):
+        npts = self.get_numpoints(legend) or 50
+        x = np.linspace(0, width, npts)
+        y = np.full(npts, height / 2.0 - ydescent)
+        points = np.array([x, y]).T.reshape(-1, 1, 2)
+        segments = np.concatenate([points[:-1], points[1:]], axis=1)
+        lc = LineCollection(segments, cmap=artist.cmap, transform=trans)
+        lc.set_array(np.linspace(0.0, 1.0, len(segments)))
+        lc.set_linewidth(artist.get_linewidth())
+        return [lc]
+
+
+def _overlay_reference_inputs(ax, n, cmap, ct_sol=None, uniform_sol=None):
+    """Overlay uniform input references on a colored-input axis, with a legend.
+
+    ``ct_sol`` (dense uniform reference) is drawn as a dashed grey line and
+    ``uniform_sol`` (same-n uniform OCP) as a green dotted line. Both are dicts
+    with keys 'u_arr' and 'dts'. No-op when both are None.
+    """
+    if ct_sol is None and uniform_sol is None:
+        return
+
+    cmap_obj = plt.get_cmap(cmap) if isinstance(cmap, str) else cmap
+    # Gradient line proxy so the legend entry matches the color-changing input.
+    nonuniform_handle = LineCollection([np.zeros((2, 2))], cmap=cmap_obj,
+                                       linewidth=2)
+    nonuniform_handle.set_array(np.array([0.0, 1.0]))
+    nonuniform_handle.set_label(f"Non uniform - {n} steps")
+    legend_elements = [nonuniform_handle]
+
+    if ct_sol is not None:
+        u_ct = np.asarray(ct_sol['u_arr']).flatten()
+        dts_ct = np.asarray(ct_sol['dts']).flatten()
+        times_ct = np.concatenate(([0.0], np.cumsum(dts_ct)))
+        u_ct_step = np.concatenate((u_ct, u_ct[-1:]))
+        ax.step(
+            times_ct, u_ct_step, where='post',
+            linestyle='--', color='grey', linewidth=1.0, zorder=3,
+        )
+        legend_elements.append(
+            Line2D([0], [0], color='grey', linestyle='--', lw=1.0,
+                   label=f"Uniform - {len(u_ct)} steps"),
+        )
+
+    if uniform_sol is not None:
+        u_uni = np.asarray(uniform_sol['u_arr']).flatten()
+        dts_uni = np.asarray(uniform_sol['dts']).flatten()
+        times_uni = np.concatenate(([0.0], np.cumsum(dts_uni)))
+        u_uni_step = np.concatenate((u_uni, u_uni[-1:]))
+        ax.step(
+            times_uni, u_uni_step, where='post',
+            linestyle=':', color='green', linewidth=1.2, zorder=3,
+        )
+        legend_elements.append(
+            Line2D([0], [0], color='green', linestyle=':', lw=1.2,
+                   label=f"Uniform - {len(u_uni)} steps"),
+        )
+
+    ax.legend(handles=legend_elements,
+              handler_map={LineCollection: _HandlerColorLine(numpoints=50)},
+              fontsize=7, loc='best')
+
+
 def plot_training_res(sol, history, n, sol_method, cmap="plasma", norm="linear",
                        zoom_xlim=None, zoom_loc_state=None,
-                       zoom_loc_input=None, ct_sol=None):
+                       zoom_loc_input=None, ct_sol=None, uniform_sol=None,
+                       state_labels=None):
     """Plot training results (2x2 grid): loss, timesteps, state, colored input.
 
     Args:
@@ -116,10 +191,13 @@ def plot_training_res(sol, history, n, sol_method, cmap="plasma", norm="linear",
             bottom-right).
         zoom_loc_input: inset [x, y, w, h] for the input subplot (default
             top-right).
-        ct_sol: optional dict with keys 'u_arr' and 'dts' giving a
+        ct_sol: optional dict with keys 'u_arr' and 'dts' giving a dense
             uniformly-sampled CT reference input trajectory to overlay on the
             colored-input subplot as a dashed grey line. When provided, a
             legend is added.
+        uniform_sol: optional dict with keys 'u_arr' and 'dts' giving the OCP
+            solution with uniform timesteps and the same n as the non-uniform
+            approach. Shown as a green dotted line on the colored-input subplot.
     """
     s_arr = np.array([s.detach().numpy().tolist() for s in sol[0:n]])
     u_arr = np.array([u.detach().numpy().tolist() for u in sol[n:2 * n]])
@@ -136,27 +214,12 @@ def plot_training_res(sol, history, n, sol_method, cmap="plasma", norm="linear",
     ax[0, 1].set_ylabel("Timestep duration")
     ax[0, 1].set_title("Timesteps Evolution")
 
-    plot_timegrid(d_arr, s_arr, ax[1, 0], ylabel="State", title="State Evolution")
+    plot_timegrid(d_arr, s_arr, ax[1, 0], ylabel="State", title="State Evolution",
+                  labels=state_labels)
     plot_colored(d_arr, u_arr, ax[1, 1], cmap=cmap, norm=norm)
 
-    if ct_sol is not None:
-        u_ct = np.asarray(ct_sol['u_arr']).flatten()
-        dts_ct = np.asarray(ct_sol['dts']).flatten()
-        n_ct = len(u_ct)
-        times_ct = np.concatenate(([0.0], np.cumsum(dts_ct)))
-        u_ct_step = np.concatenate((u_ct, u_ct[-1:]))
-        ax[1, 1].step(
-            times_ct, u_ct_step, where='post',
-            linestyle='--', color='grey', linewidth=1.0, zorder=3,
-        )
-        cmap_obj = plt.get_cmap(cmap) if isinstance(cmap, str) else cmap
-        legend_elements = [
-            Line2D([0], [0], color=cmap_obj(0.5), lw=2,
-                   label=f"Non uniform - {n} steps"),
-            Line2D([0], [0], color='grey', linestyle='--', lw=1.0,
-                   label=f"Uniform - {n_ct} steps"),
-        ]
-        ax[1, 1].legend(handles=legend_elements, fontsize=7, loc='best')
+    _overlay_reference_inputs(ax[1, 1], n, cmap, ct_sol=ct_sol,
+                              uniform_sol=uniform_sol)
 
     if zoom_xlim is not None:
         times_state_input = np.cumsum(d_arr)
@@ -197,7 +260,8 @@ def plot_training_res(sol, history, n, sol_method, cmap="plasma", norm="linear",
 def save_training_res(out_dir, exp_name, sol, history, n, sol_method,
                       cmap="plasma", norm="linear",
                       zoom_xlim=None, zoom_loc_state=None,
-                      zoom_loc_input=None):
+                      zoom_loc_input=None, state_labels=None,
+                      ct_sol=None, uniform_sol=None):
     """Save training result plots to out_dir/exp_name/.
 
     Args:
@@ -213,6 +277,10 @@ def save_training_res(out_dir, exp_name, sol, history, n, sol_method,
             the saved state.pdf and input.pdf figures.
         zoom_loc_state: inset [x, y, w, h] for state.pdf (default bottom-right).
         zoom_loc_input: inset [x, y, w, h] for input.pdf (default top-right).
+        ct_sol: optional dict ('u_arr', 'dts') for a dense uniform reference,
+            overlaid on the saved input.pdf as a dashed grey line with legend.
+        uniform_sol: optional dict ('u_arr', 'dts') for the same-n uniform OCP,
+            overlaid on the saved input.pdf as a green dotted line with legend.
     """
     exp_dir = os.path.join(out_dir, exp_name)
     os.makedirs(exp_dir, exist_ok=True)
@@ -241,6 +309,8 @@ def save_training_res(out_dir, exp_name, sol, history, n, sol_method,
             time_lines=times_si,
             x_for_ylim=times_si, y_for_ylim=u_arr,
         )
+    _overlay_reference_inputs(ax, n, cmap, ct_sol=ct_sol,
+                              uniform_sol=uniform_sol)
     fig.savefig(f"{exp_dir}/input.pdf", bbox_inches='tight')
     plt.close(fig)
 
@@ -259,7 +329,7 @@ def save_training_res(out_dir, exp_name, sol, history, n, sol_method,
     plt.close(fig)
 
     fig, ax = plt.subplots(1, 1, figsize=(3.2, 3.2))
-    plot_timegrid(d_arr, s_arr, ax, ylabel="State")
+    plot_timegrid(d_arr, s_arr, ax, ylabel="State", labels=state_labels)
     if zoom_xlim is not None:
         add_zoom_inset(
             ax, fig,
@@ -619,22 +689,44 @@ def plot_method_results(name, result, results_dir, show=False,
 def plot_loss_results(loss_name, result, results_dir, show=False,
                       cmap="plasma", norm="linear",
                       zoom_xlim=None, zoom_loc_state=None,
-                      zoom_loc_input=None, ct_sol=None):
+                      zoom_loc_input=None, ct_sol=None, uniform_sol=None,
+                      baseline_factory=None, T=None, state_labels=None):
     """Plot training results for a single loss (2x2 grid).
 
     When ``ct_sol`` is provided (dict with 'u_arr' and 'dts'), the input
-    subplot also shows the dense uniform reference as a dashed grey line and
-    a legend distinguishing the two trajectories.
+    subplot also shows the dense uniform reference as a dashed grey line.
+    When ``uniform_sol`` is provided (same format), the input subplot also
+    shows the same-n uniform OCP solution as a green dotted line.
+    When ``baseline_factory`` (callable(n) -> (prob, s_vars, u_vars)) and
+    ``T`` (total horizon) are provided, the same-n uniform OCP is solved
+    automatically and shown as the green dotted line (overrides uniform_sol).
     """
     sol = result["sol"]
     history = result["history"]
     n = result["n"]
 
+    if baseline_factory is not None and T is not None and uniform_sol is None:
+        try:
+            prob_u, _s_vars_u, u_vars_u = baseline_factory(n)
+            prob_u.solve()
+            if prob_u.status in ("optimal", "optimal_inaccurate"):
+                dts_u = np.full(n, T / n)
+                u_arr_u = np.array(
+                    [np.asarray(u_vars_u[i].value).flatten()
+                     for i in range(n)]
+                )
+                uniform_sol = {'u_arr': u_arr_u, 'dts': dts_u}
+            else:
+                print(f"  Uniform baseline ({loss_name}): {prob_u.status}")
+        except Exception as exc:
+            print(f"  Uniform baseline ({loss_name}) failed: {exc}")
+
     plot_training_res(
         sol, history, n, sol_method=2, cmap=cmap, norm=norm,
         zoom_xlim=zoom_xlim, zoom_loc_state=zoom_loc_state,
         zoom_loc_input=zoom_loc_input,
-        ct_sol=ct_sol,
+        ct_sol=ct_sol, uniform_sol=uniform_sol,
+        state_labels=state_labels,
     )
     plt.suptitle(loss_name)
 
@@ -643,7 +735,9 @@ def plot_loss_results(loss_name, result, results_dir, show=False,
                           cmap=cmap, norm=norm,
                           zoom_xlim=zoom_xlim,
                           zoom_loc_state=zoom_loc_state,
-                          zoom_loc_input=zoom_loc_input)
+                          zoom_loc_input=zoom_loc_input,
+                          state_labels=state_labels,
+                          ct_sol=ct_sol, uniform_sol=uniform_sol)
 
     if not show:
         plt.close('all')
@@ -1028,7 +1122,8 @@ def run_plot_main(spec, method_configs, *, parser_extras=None,
             plot_loss_results(loss_name, result, results_dir, show=args.show,
                               ct_sol=ct_sol, zoom_xlim=zoom_xlim,
                               zoom_loc_state=zoom_loc_state,
-                              zoom_loc_input=zoom_loc_input)
+                              zoom_loc_input=zoom_loc_input,
+                              baseline_factory=baseline_factory, T=spec.T)
 
             if trajectory_plot_fn is not None:
                 dts_final = np.array(result["history"][-1]['dts']).flatten()

@@ -55,6 +55,23 @@ def loss_iv_sym(inputs, dts):
     return torch.sum(dt_pair * torch.sum(du**2, dim=1))
 
 
+def loss_iv_rate_sym(inputs, dts):
+    """L_IV_rate_sym = sum_{k=0}^{n-2} (1/dt_k + 1/dt_{k+1}) * ||u_{k+1} - u_k||^2
+
+    Symmetric (two-sided) input rate: each Δu_k is divided by BOTH adjacent
+    intervals. Compared to L_IV_rate (which divides only by dt_k), this blocks
+    the dual failure mode where a large Δu_k hides behind a single big dt:
+      - Large-dt gaming: stretching dt_k still leaves the 1/dt_{k+1} term,
+        so the rate penalty on a large Δu_k cannot vanish.
+      - The 1/dt sum is dominated by the SMALLER neighbor, so transitions
+        between fine and coarse regions remain expensive.
+    """
+    u_stack = torch.stack(inputs)
+    du = torch.diff(u_stack, dim=0)
+    inv_dt_pair = 1.0 / dts[:-1] + 1.0 / dts[1:]
+    return torch.sum(inv_dt_pair * torch.sum(du**2, dim=1))
+
+
 def loss_eq(inputs):
     """L_EQ = sum_k (w_k - w_bar)^2 where w_k = ||u_{k+1} - u_k||^2
 
@@ -234,6 +251,7 @@ LOSS_REGISTRY = {
     "L_IV": loss_iv,
     "L_IV_rate": loss_iv_rate,
     "L_IV_sym": loss_iv_sym,
+    "L_IV_rate_sym": loss_iv_rate_sym,
     "L_EQ": loss_eq,
     "L_CPC": loss_cpc,
     "L_CSS": loss_css,
@@ -259,6 +277,8 @@ def build_loss_kwargs(loss_name, states, inputs, dts, W_list, Ad_list, Bd_list,
     elif loss_name == "L_IV_rate":
         return dict(inputs=inputs, dts=dts)
     elif loss_name == "L_IV_sym":
+        return dict(inputs=inputs, dts=dts)
+    elif loss_name == "L_IV_rate_sym":
         return dict(inputs=inputs, dts=dts)
     elif loss_name == "L_EQ":
         return dict(inputs=inputs)
